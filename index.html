@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SnapKee Downloader & Media V1.3.32 (Licensed)</title>
+  <!-- Tailwind CSS via CDN for rapid utility classes -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            darkbg: '#0b0f19',
+            cardbg: '#131b2e',
+            bordercol: '#233152',
+            snapkeeBlue: '#2563eb'
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-darkbg text-slate-100 flex flex-col h-screen select-none overflow-hidden">
+
+  <!-- TOP NAVIGATION HEADER -->
+  <header class="bg-[#0c1425] border-b border-[#1e293b] px-4 py-1.5 flex items-center justify-between text-xs font-medium text-slate-300">
+    <div class="flex items-center space-x-6">
+      <div class="flex items-center space-x-1.5 text-blue-400 font-bold tracking-wider">
+        <span class="bg-blue-600 text-white rounded p-1 text-[10px] leading-none">SK</span>
+        <span>SNAPKEE</span>
+      </div>
+      <nav class="flex space-x-1">
+        <button class="nav-tab active px-3 py-1 rounded-t flex items-center gap-1.5 font-semibold">
+          <span>📥</span> Downloader
+        </button>
+        <button class="nav-tab px-3 py-1 rounded-t hover:bg-slate-800/60 transition flex items-center gap-1.5 text-slate-400">
+          <span>⚙️</span> Download Settings
+        </button>
+        <button class="nav-tab px-3 py-1 rounded-t hover:bg-slate-800/60 transition flex items-center gap-1.5 text-slate-400">
+          <span>📁</span> Workspace
+        </button>
+        <button class="nav-tab px-3 py-1 rounded-t hover:bg-slate-800/60 transition flex items-center gap-1.5 text-slate-400">
+          <span>🔄</span> Converter
+        </button>
+      </nav>
+    </div>
+    <div class="text-[11px] text-slate-400">
+      Multi-Threaded Parallel Media Engine v1.3.32
+    </div>
+  </header>
+
+  <!-- SUB-HEADER BAR (TIMER, SPEED, LICENSE) -->
+  <section class="bg-[#111827] border-b border-[#1f2937] px-4 py-2 flex items-center justify-between">
+    <div class="flex items-center space-x-4">
+      <div class="flex items-center space-x-2">
+        <div class="bg-gradient-to-tr from-red-600 to-red-500 text-white font-extrabold px-2.5 py-1 rounded shadow-md text-xs tracking-wide">
+          SNAPKEE
+        </div>
+        <div class="flex flex-col text-[10px] leading-tight font-semibold">
+          <span class="text-slate-200 uppercase tracking-wider">Scraper-Downloader-Converter</span>
+          <span class="text-blue-400">High-Speed Parallel Architecture</span>
+        </div>
+      </div>
+
+      <div class="h-6 w-[1px] bg-slate-700"></div>
+
+      <!-- Elapsed Timer -->
+      <div class="bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded flex items-center space-x-2 shadow-inner">
+        <span class="text-amber-400 text-sm">⏱️</span>
+        <span id="timerDisplay" class="font-mono font-bold text-sm text-slate-100">00:00:00</span>
+      </div>
+
+      <!-- Network Speed Meter -->
+      <div class="bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded flex items-center space-x-2 shadow-inner min-w-[125px]">
+        <span class="text-cyan-400 text-sm animate-pulse">⚡</span>
+        <span id="speedDisplay" class="font-mono font-bold text-sm text-cyan-300">0.00 Mbps</span>
+      </div>
+    </div>
+
+    <!-- Right Controls -->
+    <div class="flex items-center space-x-2.5 text-xs">
+      <button id="btnSetNickname" class="bg-slate-800 hover:bg-slate-700 border border-slate-600/80 px-2.5 py-1 rounded flex items-center gap-1.5 transition">
+        <span>👤</span> Set nickname
+      </button>
+      <button id="btnCheckUpdate" class="glow-btn-yellow px-2.5 py-1 rounded flex items-center gap-1.5 font-semibold text-xs transition">
+        <span>🔔</span> Check Update
+      </button>
+      <div class="bg-emerald-950/70 border border-emerald-500/50 text-emerald-300 px-3 py-1 rounded flex items-center gap-1.5 font-bold shadow-sm">
+        <span class="text-emerald-400 font-extrabold">✓</span> LICENSE ACTIVATED <span class="text-[10px] font-normal text-emerald-400/80">version: 1.3.32</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- TOP URL BAR & PLATFORM SELECTOR -->
+  <section class="bg-[#131d33] border-b border-[#233152] px-4 py-2.5 flex items-center justify-between gap-3 shadow-md">
+    <div class="flex items-center space-x-2">
+      <!-- Quick platform icons -->
+      <div title="DramaBox" class="w-7 h-7 rounded bg-red-600/20 border border-red-500/40 flex items-center justify-center text-red-400 font-bold text-xs cursor-pointer hover:scale-105 transition">db</div>
+      <div title="Bilibili" class="w-7 h-7 rounded bg-blue-600/20 border border-blue-500/40 flex items-center justify-center text-blue-400 font-bold text-xs cursor-pointer hover:scale-105 transition">b</div>
+      <div title="TikTok" class="w-7 h-7 rounded bg-cyan-600/20 border border-cyan-500/40 flex items-center justify-center text-cyan-400 font-bold text-xs cursor-pointer hover:scale-105 transition">C</div>
+      <div title="YouTube" class="w-7 h-7 rounded bg-amber-600/20 border border-amber-500/40 flex items-center justify-center text-amber-400 font-bold text-xs cursor-pointer hover:scale-105 transition">S</div>
+      <span class="bg-blue-900/40 border border-blue-500/30 text-blue-300 px-2 py-0.5 rounded text-[11px] font-semibold flex items-center gap-1">
+        <span>🌐</span> Supported Platforms
+      </span>
+    </div>
+
+    <!-- Input Box -->
+    <div class="flex-1 max-w-4xl relative">
+      <input 
+        type="text" 
+        id="urlInput" 
+        placeholder="Place link or URL to scrap here... (e.g. https://www.dramaboxdb.com/ep/...)" 
+        value=""
+        class="w-full bg-[#0b0f19] border border-[#2d3f66] rounded-md px-3.5 py-1.5 text-xs text-slate-100 placeholder-slate-500 input-glow shadow-inner"
+      />
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="flex items-center space-x-2">
+      <button id="btnAddQueue" class="glow-btn-blue px-4 py-1.5 rounded-md font-semibold text-xs text-white flex items-center gap-1.5 shadow-md">
+        <span>➕</span> Add to Queue
+      </button>
+      <button id="btnScrapeNow" class="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold px-5 py-1.5 rounded-md text-xs shadow-lg transition flex items-center gap-1.5">
+        <span>🔍</span> Scrape Now
+      </button>
+    </div>
+  </section>
+
+  <!-- MAIN WORKSPACE SPLIT TABLES -->
+  <main class="flex-1 flex overflow-hidden border-b border-[#233152]">
+    
+    <!-- LEFT PANEL: QUEUE DOWNLOADING (width ~ 320px) -->
+    <div class="w-80 bg-[#0e1628] border-r border-[#233152] flex flex-col">
+      <!-- Header -->
+      <div class="bg-[#004d80] text-white font-semibold text-xs px-3 py-1.5 flex items-center justify-between border-b border-blue-800 shadow-sm">
+        <div class="flex items-center gap-1.5">
+          <span>Queue Downloading</span>
+          <span class="bg-blue-900/80 text-blue-200 text-[10px] px-1.5 py-0.2 rounded font-bold" id="queueCountBadge">0</span>
+        </div>
+        <span class="cursor-pointer text-blue-200 hover:text-white" title="Help / Info">❔</span>
+      </div>
+
+      <!-- Queue Table Container -->
+      <div class="table-container" id="queueTableContainer">
+        <table id="queueTable">
+          <thead class="bg-[#0b1220] border-b border-[#1e293b]">
+            <tr>
+              <th class="w-8 text-center text-slate-400">#</th>
+              <th class="text-left text-slate-200">URL Queue</th>
+            </tr>
+          </thead>
+          <tbody id="queueTableBody">
+            <!-- Dynamically populated -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- RIGHT PANEL: ACTIVITIES TABLES (flex-1) -->
+    <div class="flex-1 bg-[#0b0f19] flex flex-col">
+      <!-- Header -->
+      <div class="bg-[#0e387a] text-white font-semibold text-xs px-3 py-1.5 flex items-center justify-between border-b border-blue-900/60 shadow-sm">
+        <div class="flex items-center gap-2">
+          <span>Activities Tables</span>
+          <span class="bg-blue-950/80 text-blue-300 text-[10px] px-2 py-0.2 rounded font-bold" id="activitiesCountBadge">0 items</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btnClearAll" class="glow-btn-yellow px-2.5 py-0.5 rounded text-[11px] flex items-center gap-1 shadow-sm">
+            <span>🗑️</span> Clear all
+          </button>
+        </div>
+      </div>
+
+      <!-- Activities Table Container -->
+      <div class="table-container" id="activitiesTableContainer">
+        <table id="activitiesTable">
+          <thead class="bg-[#0e1628] border-b border-[#233152]">
+            <tr>
+              <th class="w-8 text-center">
+                <input type="checkbox" id="selectAllCheckbox" checked class="custom-checkbox">
+              </th>
+              <th class="w-8 text-center text-slate-400">#</th>
+              <th class="min-w-[180px]">Title</th>
+              <th class="min-w-[150px]">URLs</th>
+              <th class="w-20">Folder</th>
+              <th class="w-24">Type</th>
+              <th class="w-20">Size (MB)</th>
+              <th class="w-28">Profile</th>
+              <th class="w-24">Platform</th>
+              <th class="min-w-[160px]">Status</th>
+            </tr>
+          </thead>
+          <tbody id="activitiesTableBody">
+            <!-- Dynamically populated with scraped items -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- BOTTOM SETTINGS SECTION -->
+  <section class="h-44 bg-[#0e1628] border-b border-[#233152] flex text-xs divide-x divide-[#233152]">
+    
+    <!-- LEFT: WORKSPACE SETTINGS | FILES DIRECTORY -->
+    <div class="w-[420px] p-3 flex flex-col justify-between">
+      <div class="font-bold text-blue-400 flex items-center gap-1.5 pb-1 border-b border-[#1f2d4d]">
+        <span>Workspace setting | Files directory</span>
+        <span class="text-slate-400 cursor-pointer" title="Manage storage locations">ℹ️</span>
+      </div>
+
+      <div class="space-y-2.5 mt-2">
+        <!-- Main Directory Input + Browse -->
+        <div class="flex items-center gap-2">
+          <input 
+            type="text" 
+            id="workspaceDirInput" 
+            value="D:/Channel & Page/Video downloaded" 
+            class="flex-1 bg-[#0b0f19] border border-[#2d3f66] rounded px-2.5 py-1 text-slate-100 font-mono text-[11px]"
+          />
+          <button id="btnBrowseDir" class="glow-btn-yellow px-3 py-1 rounded font-semibold text-[11px] shadow">
+            Browse directory
+          </button>
+        </div>
+
+        <!-- Sub directories display -->
+        <div class="space-y-1.5 text-[11px] text-slate-300">
+          <div class="flex items-center">
+            <span class="w-16 font-medium text-slate-400">Videos:</span>
+            <input 
+              type="text" 
+              id="videosSubpathInput" 
+              value="D:/Channel & Page/Video downloaded/video" 
+              readonly
+              class="flex-1 bg-[#111827] border border-slate-700/60 rounded px-2 py-0.5 text-slate-400 font-mono text-[10px]"
+            />
+          </div>
+          <div class="flex items-center">
+            <span class="w-16 font-medium text-slate-400">Photos:</span>
+            <input 
+              type="text" 
+              id="photosSubpathInput" 
+              value="D:/Channel & Page/Video downloaded/photo" 
+              readonly
+              class="flex-1 bg-[#111827] border border-slate-700/60 rounded px-2 py-0.5 text-slate-400 font-mono text-[10px]"
+            />
+          </div>
+        </div>
+      </div>
+      
+      <div class="text-[10px] text-slate-500 italic mt-1">
+        * Downloaded video streams (.mp4) and subtitles save automatically to this directory.
+      </div>
+    </div>
+
+    <!-- RIGHT: GENERAL DOWNLOADING & SYSTEM SETTING -->
+    <div class="flex-1 p-3 flex flex-col justify-between overflow-y-auto">
+      <div class="font-bold text-blue-400 flex items-center gap-1.5 pb-1 border-b border-[#1f2d4d]">
+        <span>General Downloading & System Setting</span>
+        <span class="text-slate-400 cursor-pointer" title="Configure parallel threads and format options">ℹ️</span>
+      </div>
+
+      <!-- Settings Grid -->
+      <div class="grid grid-cols-2 gap-x-6 gap-y-3 mt-2 text-[11px]">
+        
+        <!-- Col 1 -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="font-medium text-slate-300">File Type:</label>
+            <select id="selectFileType" class="bg-[#0b0f19] border border-[#2d3f66] rounded px-2 py-1 text-slate-200 focus:outline-none w-44">
+              <option value="Best for LDPlayer">Best for LDPlayer</option>
+              <option value="MP4 1080p (Full HD)">MP4 1080p (Full HD)</option>
+              <option value="MP4 720p (HD)">MP4 720p (HD)</option>
+              <option value="Original Stream">Original Stream</option>
+            </select>
+          </div>
+
+          <div class="flex items-center justify-between">
+            <label class="font-medium text-slate-300">File Format:</label>
+            <select id="selectFileFormat" class="bg-[#0b0f19] border border-[#2d3f66] rounded px-2 py-1 text-slate-200 focus:outline-none w-44">
+              <option value="Video ID (Caption TXT file)">Video ID (Caption TXT file)</option>
+              <option value="Video Only (.mp4)">Video Only (.mp4)</option>
+              <option value="Audio MP3 Only">Audio MP3 Only</option>
+            </select>
+          </div>
+
+          <!-- Caption checkboxes -->
+          <div class="pt-1 border-t border-slate-800 space-y-1">
+            <span class="font-semibold text-slate-400 block text-[10px] uppercase">Caption Settings:</span>
+            <div class="flex items-center space-x-4">
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" id="chkEngCaption" class="custom-checkbox">
+                <span>English caption (Translate)</span>
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" id="chkParaphrase" class="custom-checkbox">
+                <span>Paraphrasing caption</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Col 2 -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="font-medium text-slate-300 truncate max-w-[120px]" title="Path to Netscape cookies.txt or header string">Cookies / Auth:</label>
+            <div class="flex items-center gap-1 w-52">
+              <input 
+                type="text" 
+                id="inputCookies" 
+                placeholder="Path to cookies.txt or string..." 
+                class="bg-[#0b0f19] border border-[#2d3f66] rounded px-2 py-1 text-slate-200 text-[11px] font-mono w-full focus:outline-none focus:border-blue-500"
+              />
+              <button id="btnBrowseCookies" class="bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 px-1.5 py-1 rounded text-[10px] shrink-0" title="Select cookies.txt file">📂</button>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between">
+            <label class="font-medium text-slate-300 flex items-center gap-1">
+              <span>Number of Threads:</span>
+              <span class="bg-cyan-950 border border-cyan-500/50 text-cyan-300 text-[9px] px-1 py-0.2 rounded font-bold" title="Multi-threaded 1MB chunks bypass CDN speed throttling">⚡ Ultra-Fast 64Mbps</span>
+            </label>
+            <div class="flex items-center gap-1.5">
+              <input 
+                type="number" 
+                id="inputThreads" 
+                min="1" 
+                max="32" 
+                value="24" 
+                class="bg-[#0b0f19] border border-[#2d3f66] rounded px-2.5 py-1 text-slate-100 font-mono w-16 text-center font-bold text-cyan-300"
+              />
+              <span class="text-[10px] text-slate-400">(Parallel streams)</span>
+            </div>
+          </div>
+
+          <div class="space-y-1.5 pt-1">
+            <div class="flex items-center justify-between">
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" id="chkRemoveMention" checked class="custom-checkbox">
+                <span>Remove (@mention)</span>
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" id="chkEnableGpu" checked class="custom-checkbox">
+                <span>Enable GPU Acceleration</span>
+              </label>
+            </div>
+
+            <div class="flex items-center justify-between">
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" id="chkLimitHashtags" class="custom-checkbox">
+                <span>Limit hashtags:</span>
+                <input type="number" value="20" class="bg-[#0b0f19] border border-slate-700 rounded px-1 w-10 text-center text-[10px]" />
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer text-slate-400">
+                <input type="checkbox" id="chkShutdown" class="custom-checkbox">
+                <span>Shutdown PC after finished</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </section>
+
+  <!-- FOOTER ACTION & STATUS BAR -->
+  <footer class="bg-[#0c1425] px-4 py-2 flex items-center justify-between text-xs border-t border-[#1e293b]">
+    <!-- Left status message -->
+    <div class="flex items-center space-x-3">
+      <div id="footerStatusBadge" class="w-2.5 h-2.5 rounded-full bg-slate-400"></div>
+      <span id="footerStatusText" class="font-semibold text-slate-300">Ready to scrape and download</span>
+    </div>
+
+    <!-- Center progress info -->
+    <div id="downloadSummaryBar" class="hidden items-center space-x-3 bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded">
+      <span class="text-blue-400 font-semibold">Progress:</span>
+      <span id="summaryProgressText" class="font-mono font-bold text-slate-100">0 / 0 Completed</span>
+    </div>
+
+    <!-- Right Action Buttons -->
+    <div class="flex items-center space-x-3">
+      <button id="btnDownloadNow" class="glow-btn-blue px-6 py-1.5 rounded font-bold text-white shadow-lg flex items-center gap-2">
+        <span>🚀</span> Download Now
+      </button>
+      <button id="btnCancel" class="glow-btn-red px-5 py-1.5 rounded font-bold text-white shadow-lg flex items-center gap-1.5">
+        <span>🛑</span> Cancel
+      </button>
+    </div>
+  </footer>
+
+  <!-- CUSTOM RIGHT-CLICK CONTEXT MENU -->
+  <div id="contextMenu" class="context-menu">
+    <div class="context-menu-item" id="menuSelect">
+      <span>☑️</span> Select
+    </div>
+    <div class="context-menu-item" id="menuUnselect">
+      <span>⏹️</span> Unselect
+    </div>
+    <div class="context-menu-divider"></div>
+    <div class="context-menu-item" id="menuPasteLinks">
+      <span>📋</span> Paste links
+    </div>
+    <div class="context-menu-item" id="menuOpenLink">
+      <span>🔗</span> Open link
+    </div>
+    <div class="context-menu-divider"></div>
+    <div class="context-menu-item" id="menuDeleteSelected">
+      <span class="text-red-400">🗑️</span> Delete selected link
+    </div>
+    <div class="context-menu-item" id="menuShowSelected">
+      <span>👁️</span> Show selected
+    </div>
+    <div class="context-menu-divider"></div>
+    <div class="context-menu-item" id="menuOpenFolder">
+      <span>📂</span> Open File in Folder
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

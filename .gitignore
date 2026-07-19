@@ -1,0 +1,7 @@
+node_modules/
+dist/
+build/
+*.mp4
+*.log
+.DS_Store
+*.cookies.txt
