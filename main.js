@@ -13,7 +13,7 @@ function createWindow() {
     height: 900,
     minWidth: 1100,
     minHeight: 700,
-    title: 'SnapKee Downloader & Media V1.3.32 (Licensed)',
+    title: 'SnapKee Downloader & Media V1.3.37 (Licensed)',
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -37,6 +37,12 @@ function createWindow() {
   downloader.on('global-metrics', (data) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('global-metrics', data);
+    }
+  });
+
+  downloader.on('log', (data) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('download-log', data);
     }
   });
 

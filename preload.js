@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld('snapkeeAPI', {
   onGlobalMetrics: (callback) => {
     ipcRenderer.on('global-metrics', (_event, data) => callback(data));
   },
+  onLog: (callback) => {
+    ipcRenderer.on('download-log', (_event, data) => callback(data));
+  },
   onScrapeProgress: (callback) => {
     ipcRenderer.on('scrape-progress', (_event, data) => callback(data));
   },

@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SnapKee Downloader & Media V1.3.32 (Licensed)</title>
-  <!-- Tailwind CSS via CDN for rapid utility classes -->
+  <title>SnapKee Studio Pro - Next-Gen Multi-Threaded Media Downloader</title>
+  <!-- Tailwind CSS via CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="styles.css">
   <script>
@@ -12,410 +12,503 @@
       theme: {
         extend: {
           colors: {
-            darkbg: '#0b0f19',
-            cardbg: '#131b2e',
-            bordercol: '#233152',
-            snapkeeBlue: '#2563eb'
+            deepbg: '#070a13',
+            darkbg: '#0b0f1d',
+            cardbg: '#11182c',
+            surfacebg: '#141d33',
+            bordercol: '#1f2d4e',
+            neonCyan: '#00f0ff',
+            snapBlue: '#2563eb'
           }
         }
       }
     }
   </script>
 </head>
-<body class="bg-darkbg text-slate-100 flex flex-col h-screen select-none overflow-hidden">
+<body class="bg-deepbg text-slate-100 flex flex-col h-screen select-none overflow-hidden font-sans">
 
-  <!-- TOP NAVIGATION HEADER -->
-  <header class="bg-[#0c1425] border-b border-[#1e293b] px-4 py-1.5 flex items-center justify-between text-xs font-medium text-slate-300">
-    <div class="flex items-center space-x-6">
-      <div class="flex items-center space-x-1.5 text-blue-400 font-bold tracking-wider">
-        <span class="bg-blue-600 text-white rounded p-1 text-[10px] leading-none">SK</span>
-        <span>SNAPKEE</span>
+  <!-- ==================== TOP NAVIGATION & TELEMETRY HUD ==================== -->
+  <header class="bg-[#090e1c]/90 backdrop-blur-md border-b border-[#1b263e] px-4 py-2 flex items-center justify-between z-30 shrink-0">
+    
+    <!-- Brand Logo & Version -->
+    <div class="flex items-center space-x-3">
+      <div class="flex items-center space-x-2">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 via-indigo-600 to-cyan-400 p-[1px] shadow-lg shadow-blue-500/30 flex items-center justify-center">
+          <div class="w-full h-full bg-[#090e1c] rounded-[7px] flex items-center justify-center text-cyan-400 font-extrabold text-sm">
+            ⚡
+          </div>
+        </div>
+        <div class="flex flex-col">
+          <div class="flex items-center gap-1.5">
+            <span class="font-extrabold tracking-wider text-sm bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-100 to-slate-300">SNAPKEE</span>
+            <span class="bg-gradient-to-r from-blue-500 to-cyan-400 text-slate-950 font-black text-[9px] px-1.5 py-0.2 rounded font-mono uppercase tracking-widest shadow-sm">STUDIO</span>
+          </div>
+          <span class="text-[10px] text-slate-400 font-medium leading-none">Ultra Parallel Media Downloader</span>
+        </div>
       </div>
-      <nav class="flex space-x-1">
-        <button class="nav-tab active px-3 py-1 rounded-t flex items-center gap-1.5 font-semibold">
+
+      <div class="h-5 w-[1px] bg-slate-800 hidden sm:block"></div>
+
+      <!-- Navigation Tabs -->
+      <nav class="hidden md:flex items-center space-x-1">
+        <button id="tabDownloader" class="nav-tab-btn active">
           <span>📥</span> Downloader
         </button>
-        <button class="nav-tab px-3 py-1 rounded-t hover:bg-slate-800/60 transition flex items-center gap-1.5 text-slate-400">
-          <span>⚙️</span> Download Settings
+        <button id="tabQueue" class="nav-tab-btn">
+          <span>⚡</span> Batch Queue
         </button>
-        <button class="nav-tab px-3 py-1 rounded-t hover:bg-slate-800/60 transition flex items-center gap-1.5 text-slate-400">
-          <span>📁</span> Workspace
+        <button id="tabSettings" class="nav-tab-btn">
+          <span>⚙️</span> Engine Config
         </button>
-        <button class="nav-tab px-3 py-1 rounded-t hover:bg-slate-800/60 transition flex items-center gap-1.5 text-slate-400">
-          <span>🔄</span> Converter
+        <button id="tabLogs" class="nav-tab-btn">
+          <span>📜</span> Phase Logs
         </button>
       </nav>
     </div>
-    <div class="text-[11px] text-slate-400">
-      Multi-Threaded Parallel Media Engine v1.3.32
+
+    <!-- Center HUD Telemetry: Timer & Realtime Speed -->
+    <div class="flex items-center space-x-3">
+      <!-- Session Elapsed Timer -->
+      <div class="bg-[#0e1629] border border-[#1e2d4e] px-3 py-1 rounded-lg flex items-center space-x-2 shadow-inner" title="Session Elapsed Time">
+        <span class="text-amber-400 text-xs">⏱️</span>
+        <span id="timerDisplay" class="font-mono font-bold text-xs text-slate-200">00:00:00</span>
+      </div>
+
+      <!-- Realtime Bandwidth Speedometer -->
+      <div class="bg-[#0e1629] border border-[#1e2d4e] px-3 py-1 rounded-lg flex items-center space-x-2 shadow-inner min-w-[130px]" title="Realtime Download Bandwidth">
+        <span class="text-cyan-400 text-xs animate-pulse">⚡</span>
+        <span id="speedDisplay" class="font-mono font-bold text-xs text-cyan-300">0.00 Mbps</span>
+      </div>
+
+      <!-- Parallel Engine Indicator -->
+      <div class="hidden lg:flex items-center space-x-1.5 bg-blue-950/40 border border-blue-500/30 px-2.5 py-1 rounded-lg text-[11px] font-semibold text-blue-300" title="Adaptive Multi-Segment Engine">
+        <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+        <span>Adaptive 8–16 Threads</span>
+      </div>
+    </div>
+
+    <!-- Right Controls: License & Actions -->
+    <div class="flex items-center space-x-2">
+      <button id="btnOpenDownloadsFolder" class="btn-surface px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow" title="Open Download Directory">
+        <span>📂</span> Vault
+      </button>
+      <button id="btnCheckUpdate" class="btn-amber-glow px-2.5 py-1 rounded-lg text-xs flex items-center gap-1.5 transition">
+        <span>🔔</span> Update
+      </button>
+      <div class="bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 px-2.5 py-1 rounded-lg flex items-center gap-1.5 text-xs font-bold shadow-sm">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400"></span>
+        <span>PRO ACTIVE</span>
+      </div>
     </div>
   </header>
 
-  <!-- SUB-HEADER BAR (TIMER, SPEED, LICENSE) -->
-  <section class="bg-[#111827] border-b border-[#1f2937] px-4 py-2 flex items-center justify-between">
-    <div class="flex items-center space-x-4">
-      <div class="flex items-center space-x-2">
-        <div class="bg-gradient-to-tr from-red-600 to-red-500 text-white font-extrabold px-2.5 py-1 rounded shadow-md text-xs tracking-wide">
-          SNAPKEE
-        </div>
-        <div class="flex flex-col text-[10px] leading-tight font-semibold">
-          <span class="text-slate-200 uppercase tracking-wider">Scraper-Downloader-Converter</span>
-          <span class="text-blue-400">High-Speed Parallel Architecture</span>
-        </div>
-      </div>
-
-      <div class="h-6 w-[1px] bg-slate-700"></div>
-
-      <!-- Elapsed Timer -->
-      <div class="bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded flex items-center space-x-2 shadow-inner">
-        <span class="text-amber-400 text-sm">⏱️</span>
-        <span id="timerDisplay" class="font-mono font-bold text-sm text-slate-100">00:00:00</span>
-      </div>
-
-      <!-- Network Speed Meter -->
-      <div class="bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded flex items-center space-x-2 shadow-inner min-w-[125px]">
-        <span class="text-cyan-400 text-sm animate-pulse">⚡</span>
-        <span id="speedDisplay" class="font-mono font-bold text-sm text-cyan-300">0.00 Mbps</span>
-      </div>
-    </div>
-
-    <!-- Right Controls -->
-    <div class="flex items-center space-x-2.5 text-xs">
-      <button id="btnSetNickname" class="bg-slate-800 hover:bg-slate-700 border border-slate-600/80 px-2.5 py-1 rounded flex items-center gap-1.5 transition">
-        <span>👤</span> Set nickname
+  <!-- ==================== HERO SEARCH & PLATFORM DOCK ==================== -->
+  <section class="bg-gradient-to-r from-[#0c1427] via-[#101a33] to-[#0c1427] border-b border-[#1f2d4e] px-4 py-2.5 flex flex-col md:flex-row items-center justify-between gap-3 shadow-lg z-20 shrink-0">
+    
+    <!-- Platform Quick Badges -->
+    <div class="flex items-center space-x-1.5 shrink-0 overflow-x-auto max-w-full pb-1 md:pb-0">
+      <button class="platform-pill platform-youtube cursor-pointer hover:scale-105 transition" title="YouTube Video & Shorts">
+        <span>🔴</span> YouTube
       </button>
-      <button id="btnCheckUpdate" class="glow-btn-yellow px-2.5 py-1 rounded flex items-center gap-1.5 font-semibold text-xs transition">
-        <span>🔔</span> Check Update
+      <button class="platform-pill platform-bilibili cursor-pointer hover:scale-105 transition" title="Bilibili HD & Subtitles">
+        <span>🔵</span> BiliBili
       </button>
-      <div class="bg-emerald-950/70 border border-emerald-500/50 text-emerald-300 px-3 py-1 rounded flex items-center gap-1.5 font-bold shadow-sm">
-        <span class="text-emerald-400 font-extrabold">✓</span> LICENSE ACTIVATED <span class="text-[10px] font-normal text-emerald-400/80">version: 1.3.32</span>
-      </div>
+      <button class="platform-pill platform-tiktok cursor-pointer hover:scale-105 transition" title="TikTok No Watermark">
+        <span>🎵</span> TikTok
+      </button>
+      <button class="platform-pill platform-facebook cursor-pointer hover:scale-105 transition" title="Facebook Watch">
+        <span>📘</span> Facebook
+      </button>
+      <button class="platform-pill platform-instagram cursor-pointer hover:scale-105 transition" title="Instagram Reels">
+        <span>📸</span> Instagram
+      </button>
+      <button class="platform-pill platform-twitter cursor-pointer hover:scale-105 transition" title="X / Twitter Videos">
+        <span>🐦</span> X
+      </button>
+      <button class="platform-pill platform-dramabox cursor-pointer hover:scale-105 transition" title="DramaBox Episodes">
+        <span>🎬</span> DramaBox
+      </button>
+      <button class="platform-pill platform-generic cursor-pointer hover:scale-105 transition" title="1000+ Direct Video Websites">
+        <span>🌐</span> All Sites
+      </button>
     </div>
-  </section>
 
-  <!-- TOP URL BAR & PLATFORM SELECTOR -->
-  <section class="bg-[#131d33] border-b border-[#233152] px-4 py-2.5 flex items-center justify-between gap-3 shadow-md">
-    <div class="flex items-center space-x-2">
-      <!-- Quick platform icons -->
-      <div title="DramaBox" class="w-7 h-7 rounded bg-red-600/20 border border-red-500/40 flex items-center justify-center text-red-400 font-bold text-xs cursor-pointer hover:scale-105 transition">db</div>
-      <div title="Bilibili" class="w-7 h-7 rounded bg-blue-600/20 border border-blue-500/40 flex items-center justify-center text-blue-400 font-bold text-xs cursor-pointer hover:scale-105 transition">b</div>
-      <div title="TikTok" class="w-7 h-7 rounded bg-cyan-600/20 border border-cyan-500/40 flex items-center justify-center text-cyan-400 font-bold text-xs cursor-pointer hover:scale-105 transition">C</div>
-      <div title="YouTube" class="w-7 h-7 rounded bg-amber-600/20 border border-amber-500/40 flex items-center justify-center text-amber-400 font-bold text-xs cursor-pointer hover:scale-105 transition">S</div>
-      <span class="bg-blue-900/40 border border-blue-500/30 text-blue-300 px-2 py-0.5 rounded text-[11px] font-semibold flex items-center gap-1">
-        <span>🌐</span> Supported Platforms
-      </span>
-    </div>
-
-    <!-- Input Box -->
-    <div class="flex-1 max-w-4xl relative">
+    <!-- Main Input Box with Floating Paste Button -->
+    <div class="flex-1 w-full max-w-3xl relative">
       <input 
         type="text" 
         id="urlInput" 
-        placeholder="Place link or URL to scrap here... (e.g. https://www.dramaboxdb.com/ep/...)" 
+        placeholder="Paste YouTube, Bilibili, TikTok, Facebook, DramaBox, or video link here..." 
         value=""
-        class="w-full bg-[#0b0f19] border border-[#2d3f66] rounded-md px-3.5 py-1.5 text-xs text-slate-100 placeholder-slate-500 input-glow shadow-inner"
+        class="w-full bg-[#070b16] border border-[#25375e] rounded-lg pl-3.5 pr-20 py-2 text-xs text-slate-100 placeholder-slate-500 input-studio shadow-inner"
       />
+      <button id="btnPasteClipboard" class="absolute right-1.5 top-1/2 -translate-y-1/2 bg-[#17233f] hover:bg-[#203057] text-slate-200 border border-slate-700/80 px-2 py-1 rounded text-[10px] font-bold transition flex items-center gap-1" title="Paste from Clipboard">
+        <span>📋</span> Paste
+      </button>
     </div>
 
-    <!-- Action Buttons -->
-    <div class="flex items-center space-x-2">
-      <button id="btnAddQueue" class="glow-btn-blue px-4 py-1.5 rounded-md font-semibold text-xs text-white flex items-center gap-1.5 shadow-md">
-        <span>➕</span> Add to Queue
+    <!-- Action Trigger Buttons -->
+    <div class="flex items-center space-x-2 shrink-0">
+      <button id="btnAddQueue" class="btn-surface px-3.5 py-2 rounded-lg font-semibold text-xs text-slate-200 flex items-center gap-1.5 shadow">
+        <span>➕</span> Add Queue
       </button>
-      <button id="btnScrapeNow" class="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold px-5 py-1.5 rounded-md text-xs shadow-lg transition flex items-center gap-1.5">
-        <span>🔍</span> Scrape Now
+      <button id="btnScrapeNow" class="btn-primary-glow px-5 py-2 rounded-lg font-bold text-xs flex items-center gap-2 shadow-lg">
+        <span>⚡</span> Scrape & Analyze
       </button>
     </div>
   </section>
 
-  <!-- MAIN WORKSPACE SPLIT TABLES -->
-  <main class="flex-1 flex overflow-hidden border-b border-[#233152]">
+  <!-- ==================== MAIN WORKSPACE AREA ==================== -->
+  <main class="flex-1 flex overflow-hidden">
     
-    <!-- LEFT PANEL: QUEUE DOWNLOADING (width ~ 320px) -->
-    <div class="w-80 bg-[#0e1628] border-r border-[#233152] flex flex-col">
-      <!-- Header -->
-      <div class="bg-[#004d80] text-white font-semibold text-xs px-3 py-1.5 flex items-center justify-between border-b border-blue-800 shadow-sm">
-        <div class="flex items-center gap-1.5">
-          <span>Queue Downloading</span>
-          <span class="bg-blue-900/80 text-blue-200 text-[10px] px-1.5 py-0.2 rounded font-bold" id="queueCountBadge">0</span>
-        </div>
-        <span class="cursor-pointer text-blue-200 hover:text-white" title="Help / Info">❔</span>
-      </div>
-
-      <!-- Queue Table Container -->
-      <div class="table-container" id="queueTableContainer">
-        <table id="queueTable">
-          <thead class="bg-[#0b1220] border-b border-[#1e293b]">
-            <tr>
-              <th class="w-8 text-center text-slate-400">#</th>
-              <th class="text-left text-slate-200">URL Queue</th>
-            </tr>
-          </thead>
-          <tbody id="queueTableBody">
-            <!-- Dynamically populated -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- RIGHT PANEL: ACTIVITIES TABLES (flex-1) -->
-    <div class="flex-1 bg-[#0b0f19] flex flex-col">
-      <!-- Header -->
-      <div class="bg-[#0e387a] text-white font-semibold text-xs px-3 py-1.5 flex items-center justify-between border-b border-blue-900/60 shadow-sm">
+    <!-- LEFT PANEL: BATCH URL QUEUE (Collapsible, width ~ 280px) -->
+    <aside id="queueSidebar" class="w-72 bg-[#090f1f] border-r border-[#1e2d4e] flex flex-col shrink-0 transition-all duration-300">
+      <!-- Queue Header -->
+      <div class="bg-[#0d162d] px-3.5 py-2 flex items-center justify-between border-b border-[#1e2d4e] shadow-sm">
         <div class="flex items-center gap-2">
-          <span>Activities Tables</span>
-          <span class="bg-blue-950/80 text-blue-300 text-[10px] px-2 py-0.2 rounded font-bold" id="activitiesCountBadge">0 items</span>
+          <span class="font-bold text-xs text-slate-200">📥 Batch Queue</span>
+          <span id="queueCountBadge" class="bg-blue-600/30 border border-blue-500/40 text-blue-300 text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold">0</span>
         </div>
-        <div class="flex items-center gap-2">
-          <button id="btnClearAll" class="glow-btn-yellow px-2.5 py-0.5 rounded text-[11px] flex items-center gap-1 shadow-sm">
-            <span>🗑️</span> Clear all
+        <div class="flex items-center space-x-1">
+          <button id="btnPasteQueueList" class="text-[10px] bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2 py-0.5 rounded text-slate-300 font-semibold transition" title="Paste multiple URLs from clipboard">
+            Paste List
+          </button>
+          <button id="btnClearQueue" class="text-[10px] text-slate-400 hover:text-red-400 px-1 py-0.5" title="Clear Queue">
+            🗑️
           </button>
         </div>
       </div>
 
-      <!-- Activities Table Container -->
-      <div class="table-container" id="activitiesTableContainer">
-        <table id="activitiesTable">
-          <thead class="bg-[#0e1628] border-b border-[#233152]">
-            <tr>
-              <th class="w-8 text-center">
-                <input type="checkbox" id="selectAllCheckbox" checked class="custom-checkbox">
-              </th>
-              <th class="w-8 text-center text-slate-400">#</th>
-              <th class="min-w-[180px]">Title</th>
-              <th class="min-w-[150px]">URLs</th>
-              <th class="w-20">Folder</th>
-              <th class="w-24">Type</th>
-              <th class="w-20">Size (MB)</th>
-              <th class="w-28">Profile</th>
-              <th class="w-24">Platform</th>
-              <th class="min-w-[160px]">Status</th>
-            </tr>
-          </thead>
-          <tbody id="activitiesTableBody">
-            <!-- Dynamically populated with scraped items -->
-          </tbody>
-        </table>
+      <!-- Queue List Container -->
+      <div class="table-container p-2 space-y-1.5" id="queueListContainer">
+        <div id="queueEmptyState" class="h-full flex flex-col items-center justify-center text-center p-4 text-slate-500">
+          <span class="text-2xl mb-1.5 opacity-60">📋</span>
+          <span class="text-xs font-semibold text-slate-400">Queue is empty</span>
+          <span class="text-[10px] text-slate-500 mt-0.5">Paste links above or click "Add Queue" to build your batch</span>
+        </div>
+        <div id="queueItemsList" class="space-y-1.5">
+          <!-- Dynamically populated queue items -->
+        </div>
       </div>
-    </div>
+    </aside>
+
+    <!-- RIGHT PANEL: DETECTED MEDIA WORKSPACE -->
+    <section class="flex-1 bg-[#070b16] flex flex-col overflow-hidden">
+      
+      <!-- Workspace Action Header -->
+      <div class="bg-[#0b1224] px-4 py-2 flex items-center justify-between border-b border-[#1b2846] shadow-sm shrink-0">
+        <div class="flex items-center space-x-3">
+          <div class="flex items-center gap-2">
+            <span class="font-bold text-xs text-slate-200">🎬 Detected Media Streams</span>
+            <span id="activitiesCountBadge" class="bg-blue-950 border border-blue-500/40 text-cyan-300 text-[10px] px-2 py-0.5 rounded-full font-mono font-bold">0 ready</span>
+          </div>
+
+          <div class="h-4 w-[1px] bg-slate-800"></div>
+
+          <!-- Quick Filter Pills -->
+          <div class="hidden sm:flex items-center space-x-1 text-[10px]">
+            <button class="filter-btn active bg-blue-600/30 border border-blue-500/40 text-blue-300 px-2 py-0.5 rounded" data-filter="all">All</button>
+            <button class="filter-btn text-slate-400 hover:text-slate-200 px-2 py-0.5 rounded" data-filter="youtube">YouTube</button>
+            <button class="filter-btn text-slate-400 hover:text-slate-200 px-2 py-0.5 rounded" data-filter="bilibili">Bilibili</button>
+            <button class="filter-btn text-slate-400 hover:text-slate-200 px-2 py-0.5 rounded" data-filter="other">Others</button>
+          </div>
+        </div>
+
+        <!-- Right Controls: View Switcher, Select All, Clear -->
+        <div class="flex items-center space-x-2">
+          <!-- View Switcher -->
+          <div class="flex items-center bg-[#070a14] border border-[#1f2d4e] rounded-lg p-0.5">
+            <button id="btnViewCards" class="px-2 py-0.5 rounded text-[11px] font-semibold text-cyan-300 bg-blue-600/30 shadow-sm" title="Rich Media Cards View">
+              🎴 Cards
+            </button>
+            <button id="btnViewTable" class="px-2 py-0.5 rounded text-[11px] font-semibold text-slate-400 hover:text-slate-200" title="Dense Table View">
+              📋 Table
+            </button>
+          </div>
+
+          <div class="h-4 w-[1px] bg-slate-800"></div>
+
+          <!-- Select All Controls -->
+          <label class="flex items-center gap-1.5 cursor-pointer text-xs font-semibold text-slate-300 hover:text-white">
+            <input type="checkbox" id="selectAllCheckbox" checked class="custom-checkbox">
+            <span>Select All</span>
+          </label>
+
+          <button id="btnClearAll" class="text-xs text-slate-400 hover:text-red-400 border border-slate-700/60 hover:border-red-500/40 bg-slate-800/60 px-2.5 py-1 rounded-lg flex items-center gap-1 transition">
+            <span>🗑️</span> Clear
+          </button>
+        </div>
+      </div>
+
+      <!-- Media Content View Area (Cards or Table) -->
+      <div class="table-container p-3 overflow-y-auto flex-1" id="mediaContainer">
+        
+        <!-- Empty State -->
+        <div id="mediaEmptyState" class="h-full flex flex-col items-center justify-center text-center p-8 text-slate-500">
+          <div class="w-16 h-16 rounded-2xl bg-[#0f172a] border border-[#1e293b] flex items-center justify-center text-3xl mb-3 shadow-inner">
+            🎬
+          </div>
+          <span class="text-sm font-bold text-slate-300">No Media Scraped Yet</span>
+          <p class="text-xs text-slate-500 max-w-sm mt-1">
+            Enter a video URL or playlist link above and click <span class="text-blue-400 font-semibold">"Scrape & Analyze"</span> to detect video streams, thumbnails, resolutions, and subtitles.
+          </p>
+        </div>
+
+        <!-- CARDS VIEW WRAPPER -->
+        <div id="mediaCardsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 hidden">
+          <!-- Dynamically populated media cards -->
+        </div>
+
+        <!-- TABLE VIEW WRAPPER -->
+        <div id="mediaTableWrapper" class="hidden">
+          <table>
+            <thead>
+              <tr>
+                <th class="w-8 text-center">
+                  <input type="checkbox" id="tableSelectAllCheckbox" checked class="custom-checkbox">
+                </th>
+                <th class="w-12 text-center text-slate-400">#</th>
+                <th class="w-20">Preview</th>
+                <th class="min-w-[200px]">Title & Creator</th>
+                <th class="w-24">Platform</th>
+                <th class="w-20">Quality</th>
+                <th class="w-20">Size</th>
+                <th class="min-w-[140px]">Subtitles</th>
+                <th class="min-w-[180px]">Status & Progress</th>
+                <th class="w-16 text-center">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="activitiesTableBody">
+              <!-- Dynamically populated table rows -->
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+
+      <!-- Collapsible Live Telemetry & Phase Log Console -->
+      <div id="logShell" class="live-log-shell transition-all duration-300" style="height: 8.5rem;">
+        <div class="live-log-header">
+          <div class="flex items-center gap-2">
+            <span class="text-cyan-400 font-bold">⚡ Phase Telemetry & Live Engine Log</span>
+            <span class="text-[9px] text-blue-300 bg-blue-950/80 border border-blue-500/30 px-1.5 py-0.2 rounded font-mono">Real-time</span>
+          </div>
+          <div class="flex items-center space-x-2">
+            <button id="btnToggleLogSize" class="text-[10px] text-slate-400 hover:text-slate-200" title="Toggle Log Height">↕ Resize</button>
+            <button id="btnClearLog" class="live-log-clear">Clear</button>
+          </div>
+        </div>
+        <div id="liveLogPanel" class="live-log-panel"></div>
+      </div>
+
+    </section>
 
   </main>
 
-  <!-- BOTTOM SETTINGS SECTION -->
-  <section class="h-44 bg-[#0e1628] border-b border-[#233152] flex text-xs divide-x divide-[#233152]">
+  <!-- ==================== BOTTOM CONFIGURATION & STORAGE DECK ==================== -->
+  <section class="bg-[#0a0f1d] border-t border-[#1b263e] p-3 flex flex-col md:flex-row gap-4 shrink-0 text-xs">
     
-    <!-- LEFT: WORKSPACE SETTINGS | FILES DIRECTORY -->
-    <div class="w-[420px] p-3 flex flex-col justify-between">
-      <div class="font-bold text-blue-400 flex items-center gap-1.5 pb-1 border-b border-[#1f2d4d]">
-        <span>Workspace setting | Files directory</span>
-        <span class="text-slate-400 cursor-pointer" title="Manage storage locations">ℹ️</span>
+    <!-- LEFT: STORAGE VAULT & DIRECTORY ROUTING -->
+    <div class="w-full md:w-96 flex flex-col justify-between space-y-2 border-b md:border-b-0 md:border-r border-[#1b263e] pr-0 md:pr-4">
+      <div class="flex items-center justify-between">
+        <span class="font-bold text-blue-400 flex items-center gap-1.5">
+          <span>📁 Storage Vault & Target Directory</span>
+        </span>
+        <button id="btnOpenTargetDir" class="text-[10px] text-slate-400 hover:text-cyan-300 transition" title="Open folder in Explorer">
+          Open Folder ↗
+        </button>
       </div>
 
-      <div class="space-y-2.5 mt-2">
-        <!-- Main Directory Input + Browse -->
-        <div class="flex items-center gap-2">
-          <input 
-            type="text" 
-            id="workspaceDirInput" 
-            value="D:/Channel & Page/Video downloaded" 
-            class="flex-1 bg-[#0b0f19] border border-[#2d3f66] rounded px-2.5 py-1 text-slate-100 font-mono text-[11px]"
-          />
-          <button id="btnBrowseDir" class="glow-btn-yellow px-3 py-1 rounded font-semibold text-[11px] shadow">
-            Browse directory
-          </button>
-        </div>
+      <div class="flex items-center gap-2">
+        <input 
+          type="text" 
+          id="workspaceDirInput" 
+          value="D:/Channel & Page/Video downloaded" 
+          class="flex-1 bg-[#060913] border border-[#233152] rounded-lg px-2.5 py-1.5 text-slate-100 font-mono text-[11px] input-studio"
+        />
+        <button id="btnBrowseDir" class="btn-amber-glow px-3 py-1.5 rounded-lg font-bold text-[11px] shrink-0">
+          Browse
+        </button>
+      </div>
 
-        <!-- Sub directories display -->
-        <div class="space-y-1.5 text-[11px] text-slate-300">
-          <div class="flex items-center">
-            <span class="w-16 font-medium text-slate-400">Videos:</span>
-            <input 
-              type="text" 
-              id="videosSubpathInput" 
-              value="D:/Channel & Page/Video downloaded/video" 
-              readonly
-              class="flex-1 bg-[#111827] border border-slate-700/60 rounded px-2 py-0.5 text-slate-400 font-mono text-[10px]"
-            />
-          </div>
-          <div class="flex items-center">
-            <span class="w-16 font-medium text-slate-400">Photos:</span>
-            <input 
-              type="text" 
-              id="photosSubpathInput" 
-              value="D:/Channel & Page/Video downloaded/photo" 
-              readonly
-              class="flex-1 bg-[#111827] border border-slate-700/60 rounded px-2 py-0.5 text-slate-400 font-mono text-[10px]"
-            />
-          </div>
-        </div>
+      <!-- Subfolder routing indicators -->
+      <div class="flex items-center gap-2 text-[10px] text-slate-400">
+        <span class="bg-[#10182c] border border-slate-700/50 px-2 py-0.5 rounded font-mono">🎥 /video (.mp4)</span>
+        <span class="bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 px-2 py-0.5 rounded font-mono">📝 /video (.srt synced)</span>
+        <span class="bg-[#10182c] border border-slate-700/50 px-2 py-0.5 rounded font-mono">🖼️ /photo</span>
       </div>
-      
-      <div class="text-[10px] text-slate-500 italic mt-1">
-        * Downloaded video streams (.mp4) and subtitles save automatically to this directory.
-      </div>
+      <input type="hidden" id="videosSubpathInput" value="D:/Channel & Page/Video downloaded/video" />
+      <input type="hidden" id="photosSubpathInput" value="D:/Channel & Page/Video downloaded/photo" />
     </div>
 
-    <!-- RIGHT: GENERAL DOWNLOADING & SYSTEM SETTING -->
-    <div class="flex-1 p-3 flex flex-col justify-between overflow-y-auto">
-      <div class="font-bold text-blue-400 flex items-center gap-1.5 pb-1 border-b border-[#1f2d4d]">
-        <span>General Downloading & System Setting</span>
-        <span class="text-slate-400 cursor-pointer" title="Configure parallel threads and format options">ℹ️</span>
+    <!-- RIGHT: ENGINE TUNING & SUBTITLE SETTINGS -->
+    <div class="flex-1 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      
+      <!-- Stream Quality & Subtitle Engine -->
+      <div class="space-y-1.5">
+        <div class="flex items-center justify-between">
+          <label class="font-medium text-slate-300 text-[11px]">Quality Resolution:</label>
+          <select id="selectFileType" class="bg-[#060913] border border-[#233152] rounded-md px-2 py-1 text-slate-200 text-[11px] focus:outline-none w-36">
+            <option value="Highest Available (Original / 4K)">Highest (Original / 4K)</option>
+            <option value="MP4 1440p (2K)">MP4 1440p (2K)</option>
+            <option value="MP4 1080p (Full HD)">MP4 1080p (Full HD)</option>
+            <option value="MP4 720p (HD)">MP4 720p (HD)</option>
+            <option value="MP4 480p (SD)">MP4 480p (SD)</option>
+            <option value="Original Stream">Original Stream</option>
+          </select>
+        </div>
+
+        <div class="flex items-center justify-between">
+          <label class="font-medium text-slate-300 text-[11px]">Format & Subtitles:</label>
+          <select id="selectFileFormat" class="bg-[#060913] border border-[#233152] rounded-md px-2 py-1 text-slate-200 text-[11px] focus:outline-none w-36">
+            <option value="Video ID (Caption TXT file)">1 Video + 1 Subtitle (.srt)</option>
+            <option value="Video Only (.mp4)">Video Only (.mp4)</option>
+            <option value="Subtitle Only (.srt)">Subtitle Only (.srt)</option>
+            <option value="Audio MP3 Only">Audio MP3 Only</option>
+          </select>
+        </div>
+
+        <div class="flex items-center justify-between">
+          <label class="font-medium text-slate-300 text-[11px]">Bilibili Engine:</label>
+          <select id="selectBilibiliMode" class="bg-[#060913] border border-[#233152] rounded-md px-2 py-1 text-slate-200 text-[11px] focus:outline-none w-36">
+            <option value="fast" selected>Fast (16 Workers ⚡)</option>
+            <option value="balanced">Balanced (12 Workers)</option>
+            <option value="stable">Stable (8 Workers)</option>
+          </select>
+        </div>
       </div>
 
-      <!-- Settings Grid -->
-      <div class="grid grid-cols-2 gap-x-6 gap-y-3 mt-2 text-[11px]">
-        
-        <!-- Col 1 -->
-        <div class="space-y-2">
-          <div class="flex items-center justify-between">
-            <label class="font-medium text-slate-300">File Type:</label>
-            <select id="selectFileType" class="bg-[#0b0f19] border border-[#2d3f66] rounded px-2 py-1 text-slate-200 focus:outline-none w-44">
-              <option value="Best for LDPlayer">Best for LDPlayer</option>
-              <option value="MP4 1080p (Full HD)">MP4 1080p (Full HD)</option>
-              <option value="MP4 720p (HD)">MP4 720p (HD)</option>
-              <option value="Original Stream">Original Stream</option>
-            </select>
-          </div>
-
-          <div class="flex items-center justify-between">
-            <label class="font-medium text-slate-300">File Format:</label>
-            <select id="selectFileFormat" class="bg-[#0b0f19] border border-[#2d3f66] rounded px-2 py-1 text-slate-200 focus:outline-none w-44">
-              <option value="Video ID (Caption TXT file)">Video ID (Caption TXT file)</option>
-              <option value="Video Only (.mp4)">Video Only (.mp4)</option>
-              <option value="Audio MP3 Only">Audio MP3 Only</option>
-            </select>
-          </div>
-
-          <!-- Caption checkboxes -->
-          <div class="pt-1 border-t border-slate-800 space-y-1">
-            <span class="font-semibold text-slate-400 block text-[10px] uppercase">Caption Settings:</span>
-            <div class="flex items-center space-x-4">
-              <label class="flex items-center gap-1.5 cursor-pointer">
-                <input type="checkbox" id="chkEngCaption" class="custom-checkbox">
-                <span>English caption (Translate)</span>
-              </label>
-              <label class="flex items-center gap-1.5 cursor-pointer">
-                <input type="checkbox" id="chkParaphrase" class="custom-checkbox">
-                <span>Paraphrasing caption</span>
-              </label>
-            </div>
+      <!-- Multi-Thread Concurrency & Authentication -->
+      <div class="space-y-1.5">
+        <div class="flex items-center justify-between">
+          <label class="font-medium text-slate-300 text-[11px] flex items-center gap-1">
+            <span>Adaptive Threads:</span>
+            <span class="text-[9px] bg-cyan-950 border border-cyan-500/50 text-cyan-300 px-1 py-0.2 rounded font-bold">8–16</span>
+          </label>
+          <div class="flex items-center gap-1">
+            <input 
+              type="number" 
+              id="inputThreads" 
+              min="2" 
+              max="16" 
+              value="12" 
+              class="bg-[#060913] border border-[#233152] rounded px-2 py-0.5 text-cyan-300 font-mono text-center font-bold w-14"
+            />
+            <span class="text-[10px] text-slate-500">workers</span>
           </div>
         </div>
 
-        <!-- Col 2 -->
-        <div class="space-y-2">
-          <div class="flex items-center justify-between">
-            <label class="font-medium text-slate-300 truncate max-w-[120px]" title="Path to Netscape cookies.txt or header string">Cookies / Auth:</label>
-            <div class="flex items-center gap-1 w-52">
-              <input 
-                type="text" 
-                id="inputCookies" 
-                placeholder="Path to cookies.txt or string..." 
-                class="bg-[#0b0f19] border border-[#2d3f66] rounded px-2 py-1 text-slate-200 text-[11px] font-mono w-full focus:outline-none focus:border-blue-500"
-              />
-              <button id="btnBrowseCookies" class="bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 px-1.5 py-1 rounded text-[10px] shrink-0" title="Select cookies.txt file">📂</button>
-            </div>
-          </div>
-
-          <div class="flex items-center justify-between">
-            <label class="font-medium text-slate-300 flex items-center gap-1">
-              <span>Number of Threads:</span>
-              <span class="bg-cyan-950 border border-cyan-500/50 text-cyan-300 text-[9px] px-1 py-0.2 rounded font-bold" title="Multi-threaded 1MB chunks bypass CDN speed throttling">⚡ Ultra-Fast 64Mbps</span>
-            </label>
-            <div class="flex items-center gap-1.5">
-              <input 
-                type="number" 
-                id="inputThreads" 
-                min="1" 
-                max="32" 
-                value="24" 
-                class="bg-[#0b0f19] border border-[#2d3f66] rounded px-2.5 py-1 text-slate-100 font-mono w-16 text-center font-bold text-cyan-300"
-              />
-              <span class="text-[10px] text-slate-400">(Parallel streams)</span>
-            </div>
-          </div>
-
-          <div class="space-y-1.5 pt-1">
-            <div class="flex items-center justify-between">
-              <label class="flex items-center gap-1.5 cursor-pointer">
-                <input type="checkbox" id="chkRemoveMention" checked class="custom-checkbox">
-                <span>Remove (@mention)</span>
-              </label>
-              <label class="flex items-center gap-1.5 cursor-pointer">
-                <input type="checkbox" id="chkEnableGpu" checked class="custom-checkbox">
-                <span>Enable GPU Acceleration</span>
-              </label>
-            </div>
-
-            <div class="flex items-center justify-between">
-              <label class="flex items-center gap-1.5 cursor-pointer">
-                <input type="checkbox" id="chkLimitHashtags" class="custom-checkbox">
-                <span>Limit hashtags:</span>
-                <input type="number" value="20" class="bg-[#0b0f19] border border-slate-700 rounded px-1 w-10 text-center text-[10px]" />
-              </label>
-              <label class="flex items-center gap-1.5 cursor-pointer text-slate-400">
-                <input type="checkbox" id="chkShutdown" class="custom-checkbox">
-                <span>Shutdown PC after finished</span>
-              </label>
-            </div>
+        <div class="flex items-center justify-between">
+          <label class="font-medium text-slate-300 text-[11px] truncate max-w-[100px]" title="Optional Cookies File for Premium Streams">Cookies Auth:</label>
+          <div class="flex items-center gap-1 w-36">
+            <input 
+              type="text" 
+              id="inputCookies" 
+              placeholder="cookies.txt path..." 
+              class="bg-[#060913] border border-[#233152] rounded px-2 py-0.5 text-slate-300 text-[10px] font-mono w-full focus:outline-none"
+            />
+            <button id="btnBrowseCookies" class="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 px-1.5 py-0.5 rounded text-[10px]" title="Browse cookies.txt">📂</button>
           </div>
         </div>
 
+        <div class="flex items-center justify-between pt-0.5">
+          <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300">
+            <input type="checkbox" id="chkEnableGpu" checked class="custom-checkbox">
+            <span>GPU Acceleration</span>
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300">
+            <input type="checkbox" id="chkRemoveMention" checked class="custom-checkbox">
+            <span>Clean Mentions</span>
+          </label>
+        </div>
       </div>
+
+      <!-- Caption Translation & Optimization -->
+      <div class="space-y-1.5">
+        <div class="flex items-center justify-between">
+          <label class="font-medium text-slate-300 text-[11px]">Subtitle Lang:</label>
+          <select id="selectSubtitleLang" class="bg-[#060913] border border-[#233152] rounded-md px-2 py-1 text-slate-200 text-[11px] focus:outline-none w-36">
+            <option value="zh-en" selected>Chinese or English (中文/EN)</option>
+            <option value="zh">Chinese First (中文优先)</option>
+            <option value="en">English First (English First)</option>
+            <option value="zh-only">Chinese Only (仅中文)</option>
+            <option value="en-only">English Only (仅英文)</option>
+            <option value="all">All / Any Language</option>
+          </select>
+        </div>
+        <div class="space-y-1 pt-0.5">
+          <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300">
+            <input type="checkbox" id="chkDownloadThumbnail" checked class="custom-checkbox">
+            <span class="text-cyan-400 font-medium">Download Thumbnail (.jpg) 🖼️</span>
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300">
+            <input type="checkbox" id="chkEngCaption" checked class="custom-checkbox">
+            <span class="text-emerald-400 font-medium">Auto-Extract Best Subtitle (.srt)</span>
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300">
+            <input type="checkbox" id="chkParaphrase" class="custom-checkbox">
+            <span>Paraphrasing & AI Tags</span>
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-400">
+            <input type="checkbox" id="chkShutdown" class="custom-checkbox">
+            <span>Auto Shutdown PC on Complete</span>
+          </label>
+        </div>
+      </div>
+
     </div>
 
   </section>
 
-  <!-- FOOTER ACTION & STATUS BAR -->
-  <footer class="bg-[#0c1425] px-4 py-2 flex items-center justify-between text-xs border-t border-[#1e293b]">
-    <!-- Left status message -->
-    <div class="flex items-center space-x-3">
-      <div id="footerStatusBadge" class="w-2.5 h-2.5 rounded-full bg-slate-400"></div>
-      <span id="footerStatusText" class="font-semibold text-slate-300">Ready to scrape and download</span>
+  <!-- ==================== MASTER LAUNCH DOCK (FOOTER) ==================== -->
+  <footer class="bg-[#070b16] px-4 py-2 flex items-center justify-between border-t border-[#1b263e] z-30 shrink-0">
+    
+    <!-- Left: Status Radar -->
+    <div class="flex items-center space-x-2.5">
+      <div id="footerStatusBadge" class="pulse-beacon bg-slate-400"></div>
+      <span id="footerStatusText" class="font-medium text-xs text-slate-300">Ready to scrape and download media</span>
     </div>
 
-    <!-- Center progress info -->
-    <div id="downloadSummaryBar" class="hidden items-center space-x-3 bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded">
-      <span class="text-blue-400 font-semibold">Progress:</span>
-      <span id="summaryProgressText" class="font-mono font-bold text-slate-100">0 / 0 Completed</span>
+    <!-- Center: Global Progress -->
+    <div id="downloadSummaryBar" class="hidden items-center space-x-3 bg-[#0d1629] border border-[#1e2d4e] px-3.5 py-1 rounded-full shadow-inner">
+      <div class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></div>
+      <span class="text-blue-400 font-bold text-xs">Batch Progress:</span>
+      <span id="summaryProgressText" class="font-mono font-bold text-xs text-slate-100">0 / 0 Completed</span>
     </div>
 
-    <!-- Right Action Buttons -->
+    <!-- Right: Big Launch & Cancel Buttons -->
     <div class="flex items-center space-x-3">
-      <button id="btnDownloadNow" class="glow-btn-blue px-6 py-1.5 rounded font-bold text-white shadow-lg flex items-center gap-2">
-        <span>🚀</span> Download Now
+      <button id="btnDownloadNow" class="btn-primary-glow px-6 py-2 rounded-xl font-bold text-xs shadow-xl flex items-center gap-2">
+        <span class="text-sm">🚀</span> Download Selected (<span id="btnDownloadCount">0</span>)
       </button>
-      <button id="btnCancel" class="glow-btn-red px-5 py-1.5 rounded font-bold text-white shadow-lg flex items-center gap-1.5">
+      <button id="btnCancel" class="btn-danger-glow px-4 py-2 rounded-xl font-bold text-xs shadow-lg flex items-center gap-1.5">
         <span>🛑</span> Cancel
       </button>
     </div>
+
   </footer>
 
-  <!-- CUSTOM RIGHT-CLICK CONTEXT MENU -->
+  <!-- ==================== CONTEXT MENU ==================== -->
   <div id="contextMenu" class="context-menu">
     <div class="context-menu-item" id="menuSelect">
-      <span>☑️</span> Select
+      <span>☑️</span> Select Item
     </div>
     <div class="context-menu-item" id="menuUnselect">
-      <span>⏹️</span> Unselect
+      <span>⏹️</span> Unselect Item
     </div>
     <div class="context-menu-divider"></div>
     <div class="context-menu-item" id="menuPasteLinks">
       <span>📋</span> Paste links
     </div>
     <div class="context-menu-item" id="menuOpenLink">
-      <span>🔗</span> Open link
-    </div>
-    <div class="context-menu-divider"></div>
-    <div class="context-menu-item" id="menuDeleteSelected">
-      <span class="text-red-400">🗑️</span> Delete selected link
-    </div>
-    <div class="context-menu-item" id="menuShowSelected">
-      <span>👁️</span> Show selected
+      <span>🔗</span> Open Link in Browser
     </div>
     <div class="context-menu-divider"></div>
     <div class="context-menu-item" id="menuOpenFolder">
-      <span>📂</span> Open File in Folder
+      <span>📂</span> Open in Folder
+    </div>
+    <div class="context-menu-item" id="menuDeleteSelected">
+      <span class="text-red-400">🗑️</span> Remove Item
     </div>
   </div>
 
