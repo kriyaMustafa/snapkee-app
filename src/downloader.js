@@ -1208,6 +1208,46 @@ class DownloaderEngine extends EventEmitter {
     this.processNextInQueue(settings);
   }
 
+  async ensureSubtitlesDownloaded(item, targetDir, baseFilenameWithoutExt, settings) {
+    if (settings.downloadSubtitles === false) return null;
+
+    const defaultSrtPath = path.join(targetDir, `${baseFilenameWithoutExt}.srt`);
+    if (fs.existsSync(defaultSrtPath) && fs.statSync(defaultSrtPath).size > 100) {
+      item.subtitleFiles = [defaultSrtPath];
+      this.emitLog('info', `Subtitle already present: ${path.basename(defaultSrtPath)}`, {
+        itemId: item.id,
+        filePath: defaultSrtPath
+      });
+      return defaultSrtPath;
+    }
+
+    this.emit('item-progress', {
+      id: item.id,
+      status: 'Downloading Subtitle...',
+      percentage: 1,
+      downloadedMB: '0.00',
+      speedMbps: '0.00'
+    });
+    this.emitLog('info', `Downloading subtitle first for item ${item.id}: ${baseFilenameWithoutExt}`, {
+      itemId: item.id
+    });
+
+    try {
+      const subPath = await this.downloadSubtitleOnly(item, settings);
+      if (subPath && fs.existsSync(subPath) && fs.statSync(subPath).size > 0) {
+        item.subtitleFiles = [subPath];
+        this.emitLog('info', `Saved 1 primary subtitle first: ${path.basename(subPath)}`, {
+          itemId: item.id,
+          filePath: subPath
+        });
+        return subPath;
+      }
+    } catch (e) {
+      this.emitLog('warn', `Subtitle pre-download error for item ${item.id}: ${e.message}`, { itemId: item.id });
+    }
+    return null;
+  }
+
   async downloadSubtitleOnly(item, settings) {
     const targetDir = this.getTargetDir(item, settings);
     const baseFilenameWithoutExt = this.cleanMovieTitle(item);
@@ -2769,7 +2809,7 @@ class DownloaderEngine extends EventEmitter {
       const subtitlePath = await this.downloadSubtitleOnly(item, settings);
       if (subtitlePath) {
         item.subtitleFiles = [subtitlePath];
-        await this.finalizeCompletedItem(item, subtitlePath, settings, 'Subtitle Completed');
+        await this.finalizeCompletedItem(item, subtitlePath, settings, 'Completed');
       } else {
         this.runningCount--;
         this.emit('item-progress', { id: item.id, status: 'Error: Subtitle download failed', percentage: 0, downloadedMB: '0.00' });
@@ -2778,35 +2818,20 @@ class DownloaderEngine extends EventEmitter {
       return;
     }
 
+    // 1. Download subtitle FIRST before starting video stream
+    if (settings.downloadSubtitles !== false) {
+      await this.ensureSubtitlesDownloaded(item, targetDir, baseFilenameWithoutExt, settings);
+    }
+
+    // 2. Check if video has already been downloaded: do not re-download, mark Completed
     const existingOutput = this.resolveExistingOutputPath(targetDir, baseFilenameWithoutExt, filePath);
     if (existingOutput) {
-      this.emitLog('info', `Existing output found for item ${item.id}, skipping video download`, {
+      this.emitLog('info', `Video already downloaded for item ${item.id} (${path.basename(existingOutput)}). Skipping video download and marking Completed.`, {
         itemId: item.id,
         filePath: existingOutput
       });
 
-      const targetUrlLower = (item.downloadUrl || item.url || '').toLowerCase();
-      const isBili = item.platform === 'BiliBili' || targetUrlLower.includes('bilibili') || targetUrlLower.includes('b23.tv') || targetUrlLower.includes('bibili');
-
-      // If subtitles are enabled and it's Bilibili, ensure subtitles are present
-      if (isBili && settings.downloadSubtitles !== false) {
-        const targetUrl = item.downloadUrl || item.url || '';
-        const bvidMatch = targetUrl.match(/BV[0-9a-zA-Z]+/i);
-        const aidMatch = targetUrl.match(/av([0-9]+)/i);
-        const pageMatch = targetUrl.match(/[?&]p=([0-9]+)/i);
-        const pageNum = pageMatch ? parseInt(pageMatch[1], 10) : (item && item.page ? item.page : 1);
-        const cid = item && item.cid ? item.cid : null;
-        const userAgent = this.getModernUserAgent(settings, item);
-        const headers = { 'User-Agent': userAgent, 'Referer': this.getBilibiliReferer(item) };
-        try {
-          const subFiles = await this.downloadBilibiliSubtitles(item, headers, cid, existingOutput, bvidMatch, aidMatch, pageNum, settings);
-          if (subFiles && subFiles.length > 0) {
-            item.subtitleFiles = subFiles;
-          }
-        } catch (e) {}
-      }
-
-      await this.finalizeCompletedItem(item, existingOutput, settings);
+      await this.finalizeCompletedItem(item, existingOutput, settings, 'Completed');
       return;
     }
 
