@@ -1510,33 +1510,36 @@ class DownloaderEngine extends EventEmitter {
         let formatFilter = '';
         if (qualitySetting.includes('1080') || qualitySetting === '1080p') {
           formatFilter = isBilibili 
-            ? 'bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b/best'
-            : 'bestvideo[height<=1080]+bestaudio/bestvideo[width<=1080]+bestaudio/best[height<=1080]/best[width<=1080]/bestvideo+bestaudio/b/best';
+            ? 'bv*[height<=1080][vcodec^=avc]+ba/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b/best'
+            : 'bestvideo[height<=1080][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
         } else if (qualitySetting.includes('720') || qualitySetting === '720p') {
           formatFilter = isBilibili
-            ? 'bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/best'
-            : 'bestvideo[height<=720]+bestaudio/bestvideo[width<=720]+bestaudio/best[height<=720]/best[width<=720]/bestvideo+bestaudio/b/best';
+            ? 'bv*[height<=720][vcodec^=avc]+ba/bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/best'
+            : 'bestvideo[height<=720][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best';
         } else if (qualitySetting.includes('480') || qualitySetting === '480p') {
           formatFilter = isBilibili
-            ? 'bv*[height<=480]+ba/b[height<=480]/bv*+ba/b/best'
-            : 'bestvideo[height<=480]+bestaudio/bestvideo[width<=480]+bestaudio/best[height<=480]/best[width<=480]/bestvideo+bestaudio/b/best';
+            ? 'bv*[height<=480][vcodec^=avc]+ba/bv*[height<=480]+ba/b[height<=480]/bv*+ba/b/best'
+            : 'bestvideo[height<=480][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/best';
         } else if (qualitySetting.includes('1440') || qualitySetting === '1440p' || qualitySetting.includes('2k')) {
           formatFilter = isBilibili
-            ? 'bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/b/best'
-            : 'bestvideo[height<=1440]+bestaudio/bestvideo[width<=1440]+bestaudio/best[height<=1440]/best[width<=1440]/bestvideo+bestaudio/b/best';
+            ? 'bv*[height<=1440][vcodec^=avc]+ba/bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/b/best'
+            : 'bestvideo[height<=1440][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best';
         } else if (qualitySetting.includes('2160') || qualitySetting.includes('4k')) {
           formatFilter = isBilibili
-            ? 'bv*[height<=2160]+ba/b[height<=2160]/bv*+ba/b/best'
-            : 'bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best[height<=2160]/b/best';
+            ? 'bv*[height<=2160][vcodec^=avc]+ba/bv*[height<=2160]+ba/b[height<=2160]/bv*+ba/b/best'
+            : 'bestvideo[height<=2160][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best';
         } else {
           // Highest Available (Original / 4K / 1080p / 8K)
           formatFilter = isBilibili
-            ? 'bv*+ba/b/best'
-            : 'bestvideo+bestaudio/b/best';
+            ? 'bv*[vcodec^=avc]+ba/bv*+ba/b/best'
+            : 'bestvideo[vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/b/best';
         }
 
         args.push('-f', formatFilter);
         args.push('--merge-output-format', mergeFormat);
+        if (mergeFormat === 'mp4') {
+          args.push('--postprocessor-args', 'Merger:-movflags +faststart');
+        }
       }
 
       const outputTemplate = path.join(targetDir, `${baseFilenameWithoutExt}.%(ext)s`);
@@ -2043,7 +2046,11 @@ class DownloaderEngine extends EventEmitter {
       const getBestVideoTrack = (dash) => {
         if (!dash || !Array.isArray(dash.video) || dash.video.length === 0) return null;
         const sorted = [...dash.video].sort((a, b) => (b.id || 0) - (a.id || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
-        return sorted.find(v => v.codecs && (v.codecs.startsWith('avc') || v.codecs.startsWith('hvc') || v.codecs.startsWith('hev') || v.codecs.startsWith('av01'))) || sorted[0];
+        // Prioritize AVC / H.264 (avc1) first: 100% universal compatibility for playback, video editors, and YouTube upload
+        return sorted.find(v => v.codecs && v.codecs.startsWith('avc'))
+            || sorted.find(v => v.codecs && (v.codecs.startsWith('hvc') || v.codecs.startsWith('hev')))
+            || sorted.find(v => v.codecs && v.codecs.startsWith('av01'))
+            || sorted[0];
       };
 
       const getBestAudioTrack = (dash) => {
@@ -2427,6 +2434,7 @@ class DownloaderEngine extends EventEmitter {
       if (audioTemp) args.push('-map', '1:a:0');
       args.push('-c:v', 'copy');
       if (audioTemp) args.push('-c:a', 'copy');
+      args.push('-movflags', '+faststart');
       args.push(outputPath);
 
       let proc = spawn(ffmpegExe, args);

@@ -1,6 +1,6 @@
 {
   "name": "snapkee-media-downloader",
-  "version": "1.3.37",
+  "version": "1.3.38",
   "description": "Desktop Media Scraper & Parallel Multi-Threaded Downloader inspired by SnapKee",
   "main": "main.js",
   "scripts": {
