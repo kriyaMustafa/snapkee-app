@@ -13,7 +13,7 @@ function createWindow() {
     height: 900,
     minWidth: 1100,
     minHeight: 700,
-    title: 'SnapKee Downloader & Media V1.3.38 (Licensed)',
+    title: 'SnapKee Downloader & Media V1.3.40 (Licensed)',
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

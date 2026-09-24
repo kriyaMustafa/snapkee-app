@@ -92,13 +92,15 @@ class DownloaderEngine extends EventEmitter {
   getBilibiliDashTuning(totalBytes, streamType, settings = {}) {
     const mode = String(settings.bilibiliMode || 'fast').toLowerCase();
 
+    // Conservative connection limits to prevent Bilibili CDN IP throttling or connection drops on long (2-3h+) videos
+    const isLongVideo = totalBytes > 300 * 1024 * 1024;
     const presets = {
       stable: {
-        videoWorkers: 6,
-        audioWorkers: 2,
-        minVideoChunkMB: 2,
-        maxVideoChunkMB: 15,
-        minAudioChunkMB: 1,
+        videoWorkers: isLongVideo ? 3 : 4,
+        audioWorkers: 1,
+        minVideoChunkMB: 4,
+        maxVideoChunkMB: 16,
+        minAudioChunkMB: 2,
         maxAudioChunkMB: 8,
         staggerMs: 40,
         flushIntervalMs: 50,
@@ -108,32 +110,32 @@ class DownloaderEngine extends EventEmitter {
         maxChunkRetries: 25
       },
       balanced: {
-        videoWorkers: 8,
+        videoWorkers: isLongVideo ? 4 : 6,
         audioWorkers: 2,
-        minVideoChunkMB: 2,
+        minVideoChunkMB: 4,
         maxVideoChunkMB: 20,
-        minAudioChunkMB: 1,
-        maxAudioChunkMB: 12,
+        minAudioChunkMB: 2,
+        maxAudioChunkMB: 10,
         staggerMs: 25,
         flushIntervalMs: 40,
         flushThresholdKB: 1024,
         maxBufferedKB: 4096,
         retryBackoffMs: 600,
-        maxChunkRetries: 20
+        maxChunkRetries: 25
       },
       fast: {
-        videoWorkers: 8,
+        videoWorkers: isLongVideo ? 4 : 6,
         audioWorkers: 2,
-        minVideoChunkMB: 2,
-        maxVideoChunkMB: 25,
-        minAudioChunkMB: 1,
-        maxAudioChunkMB: 15,
+        minVideoChunkMB: 4,
+        maxVideoChunkMB: 24,
+        minAudioChunkMB: 2,
+        maxAudioChunkMB: 12,
         staggerMs: 15,
         flushIntervalMs: 30,
         flushThresholdKB: 1024,
         maxBufferedKB: 4096,
         retryBackoffMs: 500,
-        maxChunkRetries: 20
+        maxChunkRetries: 25
       }
     };
     const preset = presets[mode] || presets.fast;
@@ -147,7 +149,7 @@ class DownloaderEngine extends EventEmitter {
     const minChunkBytes = (streamType === 'audio' ? preset.minAudioChunkMB : preset.minVideoChunkMB) * 1024 * 1024;
     const maxChunkBytes = (streamType === 'audio' ? preset.maxAudioChunkMB : preset.maxVideoChunkMB) * 1024 * 1024;
     let chunkBytes = totalBytes > 0
-      ? Math.ceil(totalBytes / Math.max(workerCount * 4, 8))
+      ? Math.ceil(totalBytes / Math.max(workerCount * 4, 12))
       : minChunkBytes;
     if (chunkBytes < minChunkBytes) chunkBytes = minChunkBytes;
     if (chunkBytes > maxChunkBytes) chunkBytes = maxChunkBytes;
@@ -936,7 +938,7 @@ class DownloaderEngine extends EventEmitter {
       try {
         if (candidatePath && fs.existsSync(candidatePath) && !this.isIntermediateDownloadFile(path.basename(candidatePath))) {
           const stats = fs.statSync(candidatePath);
-          if (stats.size > 1024) {
+          if (stats.size > 200 * 1024) {
             return candidatePath;
           }
         }
@@ -975,6 +977,81 @@ class DownloaderEngine extends EventEmitter {
     } catch (e) {}
 
     return null;
+  }
+
+  async validateMediaFile(filePath, minBytes = 100 * 1024) {
+    if (!filePath || !fs.existsSync(filePath)) return false;
+    try {
+      const stats = fs.statSync(filePath);
+      if (stats.size < minBytes) return false;
+
+      const ffmpegExe = this.getBinPath('ffmpeg.exe');
+      if (!fs.existsSync(ffmpegExe)) {
+        return stats.size > 500 * 1024;
+      }
+
+      const { spawn } = require('child_process');
+      return await new Promise((resolve) => {
+        // Fast trailer & packet integrity verification using FFmpeg
+        const proc = spawn(ffmpegExe, [
+          '-v', 'error',
+          '-xerror',
+          '-sseof', '-10',
+          '-i', filePath,
+          '-f', 'null',
+          '-'
+        ]);
+
+        let stderr = '';
+        const timer = setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch (e) {}
+          resolve(stats.size > 500 * 1024);
+        }, 8000);
+
+        proc.stderr?.on('data', (d) => {
+          stderr += d.toString();
+        });
+
+        proc.on('close', (code) => {
+          clearTimeout(timer);
+          if (code === 0 && !stderr.trim()) {
+            resolve(true);
+          } else {
+            const isCorrupt = /(?:Invalid data found|moov atom not found|corrupt|Invalid OBU|EBADF|Header missing|Truncated|contradictionary)/i.test(stderr);
+            if (isCorrupt) {
+              resolve(false);
+            } else {
+              // Quick probe check for duration and streams (handles very short files <10s)
+              const probeProc = spawn(ffmpegExe, ['-i', filePath]);
+              let probeErr = '';
+              const probeTimer = setTimeout(() => {
+                try { probeProc.kill('SIGKILL'); } catch (e) {}
+                resolve(stats.size > 500 * 1024);
+              }, 5000);
+              probeProc.stderr?.on('data', (pd) => probeErr += pd.toString());
+              probeProc.on('close', () => {
+                clearTimeout(probeTimer);
+                const hasDuration = /Duration:\s*(\d+):(\d+):(\d+)/i.test(probeErr);
+                const hasStream = /Stream #.*(?:Video|Audio):/i.test(probeErr);
+                const hasFatalAtom = /(?:moov atom not found|Invalid data found)/i.test(probeErr);
+                resolve(hasDuration && hasStream && !hasFatalAtom);
+              });
+              probeProc.on('error', () => {
+                clearTimeout(probeTimer);
+                resolve(stats.size > 500 * 1024);
+              });
+            }
+          }
+        });
+
+        proc.on('error', () => {
+          clearTimeout(timer);
+          resolve(stats.size > 500 * 1024);
+        });
+      });
+    } catch (e) {
+      return false;
+    }
   }
 
   buildDownloadPaths(item, settings) {
@@ -1372,9 +1449,11 @@ class DownloaderEngine extends EventEmitter {
         '--newline',
         '--no-playlist',
         '--no-warnings',
-        '--ignore-errors',
+        '--abort-on-unavailable-fragment',
         '--no-check-certificates',
         '--windows-filenames',
+        '--socket-timeout', '30',
+        '--throttled-rate', '100K',
         ...this.getJsRuntimeArg()
       ];
 
@@ -1438,61 +1517,56 @@ class DownloaderEngine extends EventEmitter {
 
       if (isBilibili) {
         const biliMode = String(settings.bilibiliMode || 'balanced').toLowerCase();
-        // Optimal connection profile for Bilibili CDNs
+        // High-reliability native yt-dlp downloader for Bilibili streams (never use aria2c on Bilibili DASH)
         const fallbackProfiles = {
-          stable: { x: 4, s: 4, j: 2, k: '2M', fragments: '4', buffer: '2M', retries: '20' },
-          balanced: { x: 8, s: 8, j: 4, k: '2M', fragments: '8', buffer: '4M', retries: '16' },
-          fast: { x: 12, s: 12, j: 4, k: '2M', fragments: '12', buffer: '4M', retries: '12' }
+          stable: { fragments: '3', buffer: '4M', retries: '25' },
+          balanced: { fragments: '4', buffer: '4M', retries: '25' },
+          fast: { fragments: '6', buffer: '8M', retries: '20' }
         };
         const fallback = fallbackProfiles[biliMode] || fallbackProfiles.balanced;
         this.emitLog('info', `yt-dlp Bilibili fallback configured: mode=${biliMode}`, {
           itemId: item.id,
           mode: biliMode,
-          threads: fallback.x,
           fragments: fallback.fragments
         });
-        args.push('--downloader', aria2cExe);
-        args.push('--downloader-args', `aria2c:-c -x ${fallback.x} -s ${fallback.s} -j ${fallback.j} -k ${fallback.k} --min-split-size=2M --max-connection-per-server=8 --timeout=30 --retry-wait=3`);
-        usesExternalDownloader = true;
+        args.push('--downloader', 'dash,m3u8:native');
         args.push('--concurrent-fragments', fallback.fragments);
         args.push('--buffer-size', fallback.buffer);
         args.push('--file-access-retries', fallback.retries);
         args.push('--retries', fallback.retries);
         args.push('--fragment-retries', fallback.retries);
       } else if (isYouTube) {
-        // High-speed native yt-dlp downloader with tuned fragments and chunking
-        const numFrags = String(Math.min(16, Math.max(4, parseInt(settings.threads || 8, 10))));
+        // Resilient native yt-dlp downloader with tuned fragments and no forced chunking (prevents throttling & corruption)
+        const numFrags = String(Math.min(8, Math.max(2, parseInt(settings.threads || 6, 10))));
         args.push('--downloader', 'dash,m3u8:native');
         args.push('--concurrent-fragments', numFrags);
         args.push('--buffer-size', '16M');
-        args.push('--http-chunk-size', '10M');
-        args.push('--file-access-retries', '10');
-        args.push('--retries', '10');
-        args.push('--fragment-retries', '10');
-        args.push('--extractor-args', 'youtube:player_client=web,android,default');
-        this.emitLog('info', `Using accelerated native yt-dlp downloader (${numFrags} fragments, 16M buffer) for YouTube item ${item.id}`, { itemId: item.id });
+        args.push('--file-access-retries', '25');
+        args.push('--retries', '25');
+        args.push('--fragment-retries', '25');
+        args.push('--extractor-args', 'youtube:player_client=android,web,default');
+        this.emitLog('info', `Using resilient native yt-dlp downloader (${numFrags} fragments, 16M buffer) for YouTube item ${item.id}`, { itemId: item.id });
       } else if (isDashOrHls) {
-        // High-speed 8–16 fragments for generic DASH / HLS streams
-        const numFrags = String(Math.min(16, Math.max(4, parseInt(settings.threads || 10, 10))));
+        // High-speed fragments for generic DASH / HLS streams
+        const numFrags = String(Math.min(8, Math.max(2, parseInt(settings.threads || 8, 10))));
         args.push('--downloader', 'dash,m3u8:native');
         args.push('--concurrent-fragments', numFrags);
         args.push('--buffer-size', '8M');
-        args.push('--http-chunk-size', '5M');
-        args.push('--file-access-retries', '10');
-        args.push('--retries', '10');
-        args.push('--fragment-retries', '10');
+        args.push('--file-access-retries', '25');
+        args.push('--retries', '25');
+        args.push('--fragment-retries', '25');
         this.emitLog('info', `Using accelerated native yt-dlp downloader (${numFrags} fragments) for DASH/HLS item ${item.id}`, { itemId: item.id });
       } else {
-        // Tuned 8–16 connections and 2M min-split for direct HTTP via aria2c
+        // Tuned 8–16 connections and 2M min-split for direct static HTTP files via aria2c
         const numThreads = Math.min(16, Math.max(4, parseInt(settings.threads || 10, 10)));
         args.push('--downloader', aria2cExe);
         args.push('--downloader-args', `aria2c:-c -x ${numThreads} -s ${numThreads} -j 4 -k 2M --min-split-size=2M --max-connection-per-server=${numThreads} --timeout=30 --retry-wait=2`);
         usesExternalDownloader = true;
         args.push('--concurrent-fragments', String(numThreads));
         args.push('--buffer-size', '8M');
-        args.push('--file-access-retries', '15');
-        args.push('--retries', '15');
-        args.push('--fragment-retries', '15');
+        args.push('--file-access-retries', '20');
+        args.push('--retries', '20');
+        args.push('--fragment-retries', '20');
         this.emitLog('info', `Using aria2c accelerator (${numThreads} connections, 2M split) for item ${item.id}`, { itemId: item.id });
       }
 
@@ -1537,9 +1611,10 @@ class DownloaderEngine extends EventEmitter {
 
         args.push('-f', formatFilter);
         args.push('--merge-output-format', mergeFormat);
-        if (mergeFormat === 'mp4') {
-          args.push('--postprocessor-args', 'Merger:-movflags +faststart');
-        }
+        const muxingPostArgs = mergeFormat === 'mp4'
+          ? 'Merger:-movflags +faststart -max_muxing_queue_size 9999 -avoid_negative_ts make_zero -fflags +genpts'
+          : 'Merger:-max_muxing_queue_size 9999 -avoid_negative_ts make_zero -fflags +genpts';
+        args.push('--postprocessor-args', muxingPostArgs);
       }
 
       const outputTemplate = path.join(targetDir, `${baseFilenameWithoutExt}.%(ext)s`);
@@ -1848,10 +1923,26 @@ class DownloaderEngine extends EventEmitter {
           }
         }
 
+        let isFileValid = false;
         if (actualFilePath) {
+          isFileValid = await this.validateMediaFile(actualFilePath);
+        }
+
+        // If code !== 0 or file is corrupt/incomplete, DO NOT finalize as completed!
+        if (actualFilePath && (!isFileValid || code !== 0)) {
+          this.emitLog('warn', `yt-dlp produced an invalid or incomplete video file (${path.basename(actualFilePath)}, exitCode=${code}, valid=${isFileValid}). Removing broken file to protect user playback.`, {
+            itemId: item.id,
+            exitCode: code,
+            filePath: actualFilePath
+          });
+          try { fs.unlinkSync(actualFilePath); } catch (e) {}
+          actualFilePath = null;
+        }
+
+        if (actualFilePath && isFileValid && code === 0) {
           if (!isDone) {
             isDone = true;
-            this.emitLog('info', `yt-dlp completed for item ${item.id}`, {
+            this.emitLog('info', `yt-dlp completed and verified for item ${item.id}`, {
               itemId: item.id,
               exitCode: code,
               filePath: actualFilePath
@@ -2014,9 +2105,13 @@ class DownloaderEngine extends EventEmitter {
 
       let cachedDash = null;
       let dashFetchPromise = null;
+      let lastDashFetchTime = 0;
       const getDashUrls = async (forceRefresh = false) => {
         if (dashFetchPromise) return dashFetchPromise;
-        if (cachedDash && !forceRefresh) return cachedDash;
+        const now = Date.now();
+        if (cachedDash && (!forceRefresh || (now - lastDashFetchTime < 25000))) {
+          return cachedDash;
+        }
 
         dashFetchPromise = (async () => {
           try {
@@ -2034,6 +2129,7 @@ class DownloaderEngine extends EventEmitter {
               throw new Error("Failed to get DASH manifest: " + (playRes.data ? playRes.data.message : ''));
             }
             cachedDash = playRes.data.data.dash;
+            lastDashFetchTime = Date.now();
             logPhase('info', `DASH manifest loaded in ${Date.now() - dashStart}ms`);
             return cachedDash;
           } finally {
@@ -2062,6 +2158,11 @@ class DownloaderEngine extends EventEmitter {
       const dashInfo = await getDashUrls(true);
       const videoInfo = getBestVideoTrack(dashInfo);
       const audioInfo = getBestAudioTrack(dashInfo);
+
+      // Lock selected track ID and codecs to guarantee stream consistency across URL/token renewals on long videos
+      const lockedVideoId = videoInfo ? videoInfo.id : null;
+      const lockedVideoCodecs = videoInfo ? videoInfo.codecs : null;
+      const lockedAudioId = audioInfo ? audioInfo.id : null;
 
       const videoTemp = filePath + '.video.m4s';
       const audioTemp = filePath + '.audio.m4s';
@@ -2173,7 +2274,14 @@ class DownloaderEngine extends EventEmitter {
             
             // Find next chunk that is pending
             const chunk = chunks.find(c => (c.startByte + c.downloaded) <= c.endByte && !c.inProgress);
-            if (!chunk) break;
+            if (!chunk) {
+              const hasUnfinished = chunks.some(c => (c.startByte + c.downloaded) <= c.endByte);
+              if (hasUnfinished) {
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+              }
+              break;
+            }
             chunk.inProgress = true;
 
             let workerUrl = currentUrl;
@@ -2197,8 +2305,8 @@ class DownloaderEngine extends EventEmitter {
                   httpsAgent: HTTPS_AGENT
                 });
 
-                if (response.status === 200 && chunk.startByte > 0) {
-                  throw new Error('Server returned 200 OK instead of 206 Partial Content');
+                if (response.status === 200 && (currentStart > 0 || chunk.endByte < streamTotalBytes - 1)) {
+                  throw new Error('Server returned full stream (200 OK) instead of partial range (206)');
                 }
 
                 await new Promise((resolveChunk, rejectChunk) => {
@@ -2320,6 +2428,9 @@ class DownloaderEngine extends EventEmitter {
           if (totalExpected === totalGot && fs.existsSync(stateFile)) {
              try { fs.unlinkSync(stateFile); } catch(e){}
           }
+          if (streamTotalBytes > 0 && totalGot < totalExpected) {
+            throw new Error(`${type} stream incomplete: received ${totalGot} of ${totalExpected} bytes`);
+          }
         } else {
           if (sharedFd !== null) { try { fs.closeSync(sharedFd); } catch(e){} }
         }
@@ -2351,14 +2462,27 @@ class DownloaderEngine extends EventEmitter {
 
       const getVidUrl = async (force = false, mirrorIdx = 0) => { 
         await getDashUrls(force); 
-        const vTrack = getBestVideoTrack(cachedDash);
+        let vTrack = null;
+        if (cachedDash && Array.isArray(cachedDash.video)) {
+          if (lockedVideoId && lockedVideoCodecs) {
+            vTrack = cachedDash.video.find(v => v.id === lockedVideoId && v.codecs === lockedVideoCodecs)
+                  || cachedDash.video.find(v => v.id === lockedVideoId);
+          }
+          if (!vTrack) vTrack = getBestVideoTrack(cachedDash);
+        }
         if (!vTrack) throw new Error("No video tracks found in manifest");
         const urls = [vTrack.baseUrl, ...(vTrack.backupUrl || []), ...(vTrack.backup_url || [])].filter(Boolean);
         return urls[mirrorIdx % urls.length] || vTrack.baseUrl; 
       };
       const getAudUrl = async (force = false, mirrorIdx = 0) => { 
         await getDashUrls(force); 
-        const aTrack = getBestAudioTrack(cachedDash);
+        let aTrack = null;
+        if (cachedDash && Array.isArray(cachedDash.audio)) {
+          if (lockedAudioId) {
+            aTrack = cachedDash.audio.find(a => a.id === lockedAudioId);
+          }
+          if (!aTrack) aTrack = getBestAudioTrack(cachedDash);
+        }
         if (!aTrack) return null;
         const urls = [aTrack.baseUrl, ...(aTrack.backupUrl || []), ...(aTrack.backup_url || [])].filter(Boolean);
         return urls[mirrorIdx % urls.length] || aTrack.baseUrl; 
@@ -2373,7 +2497,14 @@ class DownloaderEngine extends EventEmitter {
 
       if (this.isCancelled) {
         logPhase('warn', 'Bilibili DASH cancelled by user');
-        return;
+        return false;
+      }
+
+      if (!fs.existsSync(videoTemp) || fs.statSync(videoTemp).size < 1024) {
+        throw new Error('Video stream file missing or invalid before merge');
+      }
+      if (audioInfo && (!fs.existsSync(audioTemp) || fs.statSync(audioTemp).size < 1024)) {
+        throw new Error('Audio stream file missing or invalid before merge');
       }
 
       logPhase('info', 'Merging DASH streams with FFmpeg');
@@ -2381,6 +2512,11 @@ class DownloaderEngine extends EventEmitter {
       
       await this.muxBilibiliDash(videoTemp, audioInfo ? audioTemp : null, filePath);
       logPhase('info', 'FFmpeg merge finished');
+
+      const isMuxValid = await this.validateMediaFile(filePath);
+      if (!isMuxValid) {
+        throw new Error('Merged video file failed integrity verification (corrupted container or incomplete streams)');
+      }
 
       if (settings.downloadSubtitles !== false) {
         logPhase('info', 'Fetching subtitles');
@@ -2397,7 +2533,7 @@ class DownloaderEngine extends EventEmitter {
         this.activeControllers.delete(item.id);
         this.speedMetrics.delete(item.id);
         item.filePath = filePath;
-        return fs.existsSync(filePath) && fs.statSync(filePath).size > 1024;
+        return isMuxValid;
       }
       return true;
 
@@ -2406,6 +2542,9 @@ class DownloaderEngine extends EventEmitter {
       this.activeControllers.delete(item.id);
       this.speedMetrics.delete(item.id);
       logPhase('error', `Bilibili DASH failed: ${err.message}`, { error: err.message });
+      if (fs.existsSync(videoTemp)) { try { fs.unlinkSync(videoTemp); } catch(e){} }
+      if (fs.existsSync(audioTemp)) { try { fs.unlinkSync(audioTemp); } catch(e){} }
+      if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch(e){} }
       if (finalize) {
         this.runningCount--;
         this.emit('item-progress', { id: item.id, status: `Error: ${err.message}`, percentage: 0, downloadedMB: '0.00' });
@@ -2424,16 +2563,21 @@ class DownloaderEngine extends EventEmitter {
     const ffmpegExe = this.getBinPath('ffmpeg.exe');
 
     return new Promise((resolve, reject) => {
-      let args = ['-y', '-i', videoTemp];
+      let args = [
+        '-y',
+        '-fflags', '+genpts',
+        '-i', videoTemp
+      ];
       if (audioTemp) {
         args.push('-i', audioTemp);
       }
-      // DASH tracks are already encoded.  Stream-copy is the fast path and
-      // avoids both a full decode/encode pass and accidental GPU use.
       args.push('-map', '0:v:0');
       if (audioTemp) args.push('-map', '1:a:0');
       args.push('-c:v', 'copy');
       if (audioTemp) args.push('-c:a', 'copy');
+      args.push('-max_muxing_queue_size', '9999');
+      args.push('-max_interleave_delta', '0');
+      args.push('-avoid_negative_ts', 'make_zero');
       args.push('-movflags', '+faststart');
       args.push(outputPath);
 
@@ -2442,12 +2586,45 @@ class DownloaderEngine extends EventEmitter {
       proc.stderr.on('data', (d) => stderrLog += d.toString());
       
       proc.on('close', (code) => {
-        if (code !== 0) {
-          reject(new Error(`FFmpeg stream-copy merge failed (Code ${code}): ${stderrLog.slice(-300)}`));
-        } else {
+        if (code === 0) {
           if (fs.existsSync(videoTemp)) { try { fs.unlinkSync(videoTemp); } catch(e){} }
           if (audioTemp && fs.existsSync(audioTemp)) { try { fs.unlinkSync(audioTemp); } catch(e){} }
           resolve();
+        } else {
+          // Stream-copy failed due to timestamp jitter / gaps on long video. Attempt audio resync repair merge.
+          this.emitLog('warn', `FFmpeg stream-copy exited ${code}. Attempting audio resync recovery for ${path.basename(outputPath)}...`);
+          let fallbackArgs = [
+            '-y',
+            '-err_detect', 'ignore_err',
+            '-fflags', '+genpts',
+            '-i', videoTemp
+          ];
+          if (audioTemp) {
+            fallbackArgs.push('-i', audioTemp);
+          }
+          fallbackArgs.push('-map', '0:v:0');
+          if (audioTemp) fallbackArgs.push('-map', '1:a:0');
+          fallbackArgs.push('-c:v', 'copy');
+          if (audioTemp) {
+            fallbackArgs.push('-c:a', 'aac', '-b:a', '192k', '-af', 'aresample=async=1');
+          }
+          fallbackArgs.push('-max_muxing_queue_size', '9999');
+          fallbackArgs.push('-avoid_negative_ts', 'make_zero');
+          fallbackArgs.push('-movflags', '+faststart');
+          fallbackArgs.push(outputPath);
+
+          let fbProc = spawn(ffmpegExe, fallbackArgs);
+          let fbStderr = '';
+          fbProc.stderr.on('data', (d) => fbStderr += d.toString());
+          fbProc.on('close', (fbCode) => {
+            if (fbCode === 0) {
+              if (fs.existsSync(videoTemp)) { try { fs.unlinkSync(videoTemp); } catch(e){} }
+              if (audioTemp && fs.existsSync(audioTemp)) { try { fs.unlinkSync(audioTemp); } catch(e){} }
+              resolve();
+            } else {
+              reject(new Error(`FFmpeg merge failed (Code ${fbCode}): ${fbStderr.slice(-300)}`));
+            }
+          });
         }
       });
     });
@@ -2609,7 +2786,7 @@ class DownloaderEngine extends EventEmitter {
             httpsAgent: HTTPS_AGENT
           });
 
-          if (response.status === 200 && chunk.startByte > 0) {
+          if (response.status === 200 && (currentStart > 0 || chunk.endByte < totalBytes - 1)) {
             throw new Error('Server returned 200 OK instead of 206 Partial Content during range query');
           }
 
@@ -2656,14 +2833,18 @@ class DownloaderEngine extends EventEmitter {
       await Promise.all(workerPromises);
       clearInterval(stateInterval);
       
+      const totalExpected = chunks.reduce((acc, c) => acc + (c.endByte - c.startByte + 1), 0);
+      const totalGot = chunks.reduce((acc, c) => acc + c.downloaded, 0);
+
       if (!this.isCancelled) {
         try { fs.writeFileSync(stateFile, JSON.stringify({ totalBytes, chunks }), 'utf8'); } catch(e){}
         if (sharedFd !== null) { try { fs.closeSync(sharedFd); sharedFd = null; } catch(e) {} }
         
-        const totalExpected = chunks.reduce((acc, c) => acc + (c.endByte - c.startByte + 1), 0);
-        const totalGot = chunks.reduce((acc, c) => acc + c.downloaded, 0);
         if (totalExpected === totalGot && fs.existsSync(stateFile)) {
            try { fs.unlinkSync(stateFile); } catch(e){}
+        }
+        if (totalBytes > 0 && totalGot < totalExpected) {
+          throw new Error(`Parallel download incomplete: received ${totalGot} of ${totalExpected} bytes`);
         }
       } else {
         if (sharedFd !== null) { try { fs.closeSync(sharedFd); sharedFd = null; } catch(e) {} }
@@ -2675,7 +2856,13 @@ class DownloaderEngine extends EventEmitter {
       if (this.isCancelled) {
         return false;
       }
-      return fs.existsSync(filePath) && fs.statSync(filePath).size > 1024;
+      const isComplete = fs.existsSync(filePath) && (totalBytes <= 0 || totalGot >= totalExpected);
+      const isValid = isComplete && (await this.validateMediaFile(filePath));
+      if (!isValid && fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); } catch (e) {}
+        throw new Error('Parallel chunk file incomplete or corrupted');
+      }
+      return isValid;
     } catch (err) {
       if (sharedFd !== null) { try { fs.closeSync(sharedFd); sharedFd = null; } catch(e) {} }
       this.activeControllers.delete(item.id);
@@ -2740,7 +2927,7 @@ class DownloaderEngine extends EventEmitter {
           const timeDiff = (now - lastTime) / 1000;
           if (timeDiff >= 0.3) {
             const bytesDiff = downloadedBytes - lastBytes;
-            const bytesPerSec = bytesDiff / timeDiff;
+            const bytesPerSec = timeDiff > 0 ? (bytesDiff / timeDiff) : 0;
             this.speedMetrics.set(item.id, bytesPerSec);
 
             lastTime = now;
@@ -2769,10 +2956,17 @@ class DownloaderEngine extends EventEmitter {
         });
 
         if (!this.isCancelled) {
-          downloadSuccess = true;
-          this.activeControllers.delete(item.id);
-          this.speedMetrics.delete(item.id);
-          return fs.existsSync(filePath) && fs.statSync(filePath).size > 1024;
+          const isComplete = fs.existsSync(filePath) && (!actualBytes || fs.statSync(filePath).size >= (actualBytes - 2048));
+          const isValid = isComplete && (await this.validateMediaFile(filePath));
+          if (isValid) {
+            downloadSuccess = true;
+            this.activeControllers.delete(item.id);
+            this.speedMetrics.delete(item.id);
+            return true;
+          } else {
+            if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch (e) {} }
+            throw new Error('Single stream download was incomplete or corrupted');
+          }
         }
       } catch (error) {
         if (axios.isCancel(error) || this.isCancelled) break;
@@ -2834,13 +3028,22 @@ class DownloaderEngine extends EventEmitter {
     // 2. Check if video has already been downloaded: do not re-download, mark Completed
     const existingOutput = this.resolveExistingOutputPath(targetDir, baseFilenameWithoutExt, filePath);
     if (existingOutput) {
-      this.emitLog('info', `Video already downloaded for item ${item.id} (${path.basename(existingOutput)}). Skipping video download and marking Completed.`, {
-        itemId: item.id,
-        filePath: existingOutput
-      });
+      const isValid = await this.validateMediaFile(existingOutput);
+      if (isValid) {
+        this.emitLog('info', `Video already downloaded and verified for item ${item.id} (${path.basename(existingOutput)}). Skipping video download and marking Completed.`, {
+          itemId: item.id,
+          filePath: existingOutput
+        });
 
-      await this.finalizeCompletedItem(item, existingOutput, settings, 'Completed');
-      return;
+        await this.finalizeCompletedItem(item, existingOutput, settings, 'Completed');
+        return;
+      } else {
+        this.emitLog('warn', `Found existing file for item ${item.id} (${path.basename(existingOutput)}) but it failed integrity verification (corrupted/incomplete). Removing to re-download cleanly.`, {
+          itemId: item.id,
+          filePath: existingOutput
+        });
+        try { fs.unlinkSync(existingOutput); } catch (e) {}
+      }
     }
 
     const targetUrlLower = (item.downloadUrl || item.url || '').toLowerCase();
@@ -2852,10 +3055,12 @@ class DownloaderEngine extends EventEmitter {
         mode: settings?.bilibiliMode || 'balanced'
       });
       const dashSuccess = await this.downloadBilibiliDASH(item, filePath, settings, { finalize: false });
-      if (dashSuccess && fs.existsSync(filePath) && fs.statSync(filePath).size > 1024) {
+      const isValid = dashSuccess && fs.existsSync(filePath) && (await this.validateMediaFile(filePath));
+      if (dashSuccess && isValid) {
         await this.finalizeCompletedItem(item, filePath, settings);
       } else if (!this.isCancelled) {
-        this.emitLog('warn', `Bilibili DASH pipeline unsuccessful, falling back to yt-dlp accelerator for item ${item.id}`, { itemId: item.id });
+        if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch (e) {} }
+        this.emitLog('warn', `Bilibili DASH pipeline unsuccessful or invalid, falling back to resilient yt-dlp pipeline for item ${item.id}`, { itemId: item.id });
         await this.downloadWithYtDlp(item, filePath, settings);
       }
       return;
