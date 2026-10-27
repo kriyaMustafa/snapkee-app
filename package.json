@@ -1,6 +1,6 @@
 {
   "name": "snapkee-media-downloader",
-  "version": "1.3.40",
+  "version": "1.3.55",
   "description": "Desktop Media Scraper & Parallel Multi-Threaded Downloader inspired by SnapKee",
   "main": "main.js",
   "scripts": {
@@ -43,10 +43,18 @@
       "!dist/**/*",
       "!bin/**/*",
       "!test_*",
-      "!*.zip"
+      "!*.zip",
+      "!*.mp4",
+      "!*.m4s",
+      "!*.mkv",
+      "!*.webm",
+      "!*.part",
+      "!*.ytdl"
     ],
     "extraResources": [
-      "bin"
+      "bin",
+      "www.youtube.com_cookies.txt",
+      "www.bilibili.com_cookies.txt"
     ]
   },
   "keywords": [

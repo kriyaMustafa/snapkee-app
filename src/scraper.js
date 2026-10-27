@@ -56,7 +56,8 @@ class ScraperEngine {
                         lower.includes('bit.ly') ||
                         lower.includes('tinyurl.com') ||
                         lower.includes('xhslink.com') ||
-                        lower.includes('pin.it');
+                        lower.includes('pin.it') ||
+                        lower.includes('novelquickapp.com');
     if (!isShortLink) return rawUrl;
 
     try {
@@ -100,6 +101,10 @@ class ScraperEngine {
     if (raw.includes('rumble.com') || ext.includes('rumble')) return 'Rumble';
     if (raw.includes('streamable.com') || ext.includes('streamable')) return 'Streamable';
     if (raw.includes('capcut.com') || ext.includes('capcut')) return 'CapCut';
+    if (raw.includes('odysee.com') || raw.includes('lbry.tv') || raw.includes('lbry://') || ext.includes('odysee') || ext.includes('lbry')) return 'Odysee';
+    if (raw.includes('donghuafun') || raw.includes('donghua') || ext.includes('donghua')) return 'DonghuaFun';
+    if (raw.includes('novelquickapp.com') || raw.includes('hongguo') || raw.includes('qznovel.com') || ext.includes('novelquick') || ext.includes('hongguo')) return 'NovelQuick';
+    if (raw.includes('ganjingworld') || ext.includes('ganjing')) return 'GanJingWorld';
     if (extractorKey) return extractorKey;
     return this.getDomain(url);
   }
@@ -393,7 +398,8 @@ class ScraperEngine {
       const targetUrlLower = targetUrl.toLowerCase();
       const isBilibili = targetUrlLower.includes('bilibili') || targetUrlLower.includes('b23.tv') || targetUrlLower.includes('bibili');
       const isYouTube = targetUrlLower.includes('youtube.com') || targetUrlLower.includes('youtu.be');
-      const isPlaylist = targetUrlLower.includes('list=') || targetUrlLower.includes('/playlist') || targetUrlLower.includes('/channel/') || targetUrlLower.includes('/@');
+      const isOdysee = targetUrlLower.includes('odysee.com') || targetUrlLower.includes('lbry.tv') || targetUrlLower.includes('lbry://');
+      const isPlaylist = targetUrlLower.includes('list=') || targetUrlLower.includes('/playlist') || targetUrlLower.includes('/channel/') || (targetUrlLower.includes('/@') && !isOdysee);
 
       const args = [
         '--dump-single-json',
@@ -412,25 +418,55 @@ class ScraperEngine {
       if (isBilibili) {
         args.push('--add-header', `Referer:${this.getBilibiliReferer(targetUrl)}`);
         args.push('--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36');
+        args.push('--extractor-args', 'bilibili:player_client=tv,android,web');
         const biliCookies = [
           process.resourcesPath ? path.join(process.resourcesPath, 'www.bilibili.com_cookies.txt') : null,
           process.execPath ? path.join(path.dirname(process.execPath), 'resources', 'www.bilibili.com_cookies.txt') : null,
           process.execPath ? path.join(path.dirname(process.execPath), 'www.bilibili.com_cookies.txt') : null,
+          path.join(process.cwd(), 'www.bilibili.com_cookies.txt'),
           path.join(__dirname, '..', 'www.bilibili.com_cookies.txt'),
           path.join(__dirname, 'www.bilibili.com_cookies.txt'),
-          path.join(process.cwd(), 'www.bilibili.com_cookies.txt')
+          'D:\\PROJECT\\www.bilibili.com_cookies.txt',
+          'D:\\PROJECT\\DOWNLOAD\\snapkee-app\\www.bilibili.com_cookies.txt'
         ].filter(Boolean).find(p => fs.existsSync(p));
-        if (biliCookies) args.push('--cookies', biliCookies);
+        if (biliCookies) {
+          let realCookie = biliCookies;
+          if (biliCookies.includes('app.asar')) {
+            try {
+              const os = require('os');
+              const tmpCookie = path.join(os.tmpdir(), 'snapkee_scraper_bili_cookies.txt');
+              fs.writeFileSync(tmpCookie, fs.readFileSync(biliCookies, 'utf8'), 'utf8');
+              realCookie = tmpCookie;
+            } catch (e) {}
+          }
+          args.push('--cookies', realCookie);
+        }
       } else if (isYouTube) {
         const ytCookies = [
           process.resourcesPath ? path.join(process.resourcesPath, 'www.youtube.com_cookies.txt') : null,
           process.execPath ? path.join(path.dirname(process.execPath), 'resources', 'www.youtube.com_cookies.txt') : null,
           process.execPath ? path.join(path.dirname(process.execPath), 'www.youtube.com_cookies.txt') : null,
+          path.join(process.cwd(), 'www.youtube.com_cookies.txt'),
           path.join(__dirname, '..', 'www.youtube.com_cookies.txt'),
           path.join(__dirname, 'www.youtube.com_cookies.txt'),
-          path.join(process.cwd(), 'www.youtube.com_cookies.txt')
+          'D:\\PROJECT\\www.youtube.com_cookies.txt',
+          'D:\\PROJECT\\DOWNLOAD\\snapkee-app\\www.youtube.com_cookies.txt'
         ].filter(Boolean).find(p => fs.existsSync(p));
-        if (ytCookies) args.push('--cookies', ytCookies);
+        if (ytCookies) {
+          let realCookie = ytCookies;
+          if (ytCookies.includes('app.asar')) {
+            try {
+              const os = require('os');
+              const tmpCookie = path.join(os.tmpdir(), 'snapkee_scraper_yt_cookies.txt');
+              fs.writeFileSync(tmpCookie, fs.readFileSync(ytCookies, 'utf8'), 'utf8');
+              realCookie = tmpCookie;
+            } catch (e) {}
+          }
+          args.push('--cookies', realCookie);
+        }
+      } else if (isOdysee) {
+        args.push('--add-header', 'Referer:https://odysee.com/');
+        args.push('--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36');
       } else {
         args.push('--impersonate', 'chrome');
       }
@@ -442,14 +478,18 @@ class ScraperEngine {
         const res = await execFileAsync(ytDlpExe, args, { timeout: 45000, maxBuffer: 50 * 1024 * 1024 });
         stdout = res.stdout;
       } catch (firstErr) {
+        const cookieIdx = args.indexOf('--cookies');
         const fallbackArgs = [
           '--dump-single-json',
           '--no-warnings',
           '--ignore-errors',
           '--no-check-certificates',
-          ...this.getJsRuntimeArg(),
-          targetCleanUrl
+          ...this.getJsRuntimeArg()
         ];
+        if (cookieIdx !== -1 && args[cookieIdx + 1]) {
+          fallbackArgs.push('--cookies', args[cookieIdx + 1]);
+        }
+        fallbackArgs.push(targetCleanUrl);
         const res = await execFileAsync(ytDlpExe, fallbackArgs, { timeout: 45000, maxBuffer: 50 * 1024 * 1024 });
         stdout = res.stdout;
       }
@@ -597,6 +637,25 @@ class ScraperEngine {
       targetUrl = this.cleanBilibiliUrl(targetUrl);
       const biliItems = await this.scrapeBilibiliDirectly(targetUrl, startId);
       if (biliItems && biliItems.length > 0) return biliItems;
+    }
+
+    // Check for DonghuaFun / Donghua MacCMS video portals (detail pages or playback links)
+    const isDonghua = targetUrlLower.includes('donghuafun.com') ||
+                      targetUrlLower.includes('donghua') ||
+                      (targetUrlLower.includes('/vod/detail/') && targetUrlLower.includes('/id/')) ||
+                      (targetUrlLower.includes('/vod/play/') && targetUrlLower.includes('/id/'));
+    if (isDonghua) {
+      const donghuaItems = await this.scrapeDonghua(targetUrl, startId);
+      if (donghuaItems && donghuaItems.length > 0) return donghuaItems;
+    }
+
+    // Check for NovelQuick / Hongguo Short Drama (novelquickapp.com)
+    const isNovelQuick = targetUrlLower.includes('novelquickapp.com') ||
+                         targetUrlLower.includes('hongguo') ||
+                         targetUrlLower.includes('qznovel.com');
+    if (isNovelQuick) {
+      const nqItems = await this.scrapeNovelQuick(targetUrl, startId);
+      if (nqItems && nqItems.length > 0) return nqItems;
     }
 
     // Try real extraction via yt-dlp first (covers YouTube, TikTok, Bilibili, Facebook, Twitter, and 1000+ video sites)
@@ -1080,6 +1139,160 @@ class ScraperEngine {
     return episodes;
   }
 
+  async scrapeNovelQuick(targetUrl, startId = 1) {
+    try {
+      const cleanUrl = this.extractCleanUrl(targetUrl);
+      const res = await axios.get(cleanUrl, {
+        timeout: 15000,
+        maxRedirects: 10,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+        }
+      });
+
+      const html = res.data;
+      if (!html || typeof html !== 'string') {
+        throw new Error('Empty response from NovelQuick');
+      }
+
+      let seriesData = null;
+      let pageData = null;
+
+      // Method 1: parse data-fn-args from modern.js router/stream scripts
+      const modernMatch = html.match(/data-fn-name=["']r["'][^>]*data-fn-args=["']([^"']+)["']/i) ||
+                          html.match(/data-fn-args=["']([^"']+)["'][^>]*data-fn-name=["']r["']/i);
+      if (modernMatch) {
+        try {
+          const rawArgs = modernMatch[1]
+            .replace(/&quot;/g, '"')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&#39;/g, "'");
+          const parsed = JSON.parse(rawArgs);
+          if (Array.isArray(parsed) && parsed.length >= 3 && parsed[2]) {
+            pageData = parsed[2];
+            seriesData = pageData.series_data || {};
+          }
+        } catch (e) {
+          console.warn('[scrapeNovelQuick] Failed to parse modern.js args:', e.message);
+        }
+      }
+
+      // Method 2: Cheerio parse OpenGraph meta tags
+      const $ = cheerio.load(html);
+      let ogTitle = $('meta[property="og:title"]').attr('content') ||
+                    $('meta[name="og:title"]').attr('content') ||
+                    $('title').text().trim();
+      let ogImage = $('meta[property="og:image"]').attr('content') ||
+                    $('meta[name="og:image"]').attr('content') || '';
+      let ogUrl = $('meta[property="og:url"]').attr('content') ||
+                  $('meta[name="og:url"]').attr('content') || '';
+
+      // Determine stream play URL
+      let playUrl = seriesData?.play_url || '';
+      if (!playUrl && ogUrl && (ogUrl.includes('.mp4') || ogUrl.includes('/video/tos/') || ogUrl.includes('qznovel.com'))) {
+        playUrl = ogUrl;
+      }
+      if (!playUrl) {
+        // Fallback regex search for direct MP4 stream in HTML
+        const mp4Match = html.match(/https?:\/\/[^"'\s<>]*(?:qznovel\.com|byteimg\.com|tos-cn-v)[^"'\s<>]*\.(?:mp4|m4s)[^"'\s<>]*/i) ||
+                         html.match(/https?:\/\/[^"'\s<>]+\.mp4[^"'\s<>]*/i);
+        if (mp4Match) {
+          playUrl = mp4Match[0];
+        }
+      }
+
+      if (!playUrl) {
+        throw new Error('Could not find video stream URL for NovelQuick');
+      }
+
+      // Clean unescaped entities in playUrl if any
+      playUrl = playUrl.replace(/&amp;/g, '&');
+
+      // Determine title
+      let title = (seriesData?.title || '').trim();
+      if (!title) {
+        title = ogTitle
+          .replace(/红果短剧\s*[｜|]\s*跟我一起免费看[《<]/g, '')
+          .replace(/[》>]/g, '')
+          .replace(/红果短剧\s*[｜|]\s*/g, '')
+          .trim();
+      }
+      if (!title) {
+        title = 'NovelQuick Short Drama';
+      }
+
+      const chapterOrder = pageData?.chapter_order;
+      let finalTitle = title;
+      if (chapterOrder !== undefined && chapterOrder !== null && chapterOrder !== '') {
+        const epNum = parseInt(chapterOrder, 10);
+        const epStr = isNaN(epNum) ? chapterOrder : (epNum < 10 ? `0${epNum}` : `${epNum}`);
+        finalTitle = `${title} (EP ${epStr})`;
+      }
+
+      // Determine cover / thumbnail
+      let thumbnail = seriesData?.series_cover || ogImage || '';
+      if (thumbnail.includes('&amp;')) {
+        thumbnail = thumbnail.replace(/&amp;/g, '&');
+      }
+
+      // Determine resolution
+      const videoMeta = seriesData?.video_meta;
+      let resolution = '720p';
+      if (videoMeta && videoMeta.height) {
+        resolution = `${videoMeta.height}p`;
+      }
+
+      // Probe Content-Length for accurate sizeMB
+      let sizeMB = '25.0';
+      try {
+        const headRes = await axios.head(playUrl, {
+          timeout: 5000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://novelquickapp.com/'
+          }
+        });
+        const cl = headRes.headers['content-length'];
+        if (cl) {
+          const bytes = parseInt(cl, 10);
+          if (!isNaN(bytes) && bytes > 0) {
+            sizeMB = (bytes / (1024 * 1024)).toFixed(1);
+          }
+        }
+      } catch (headErr) {
+        if (videoMeta?.height >= 1080) sizeMB = '35.0';
+        else if (videoMeta?.height >= 720) sizeMB = '15.0';
+      }
+
+      return [{
+        id: startId,
+        title: finalTitle,
+        url: targetUrl,
+        downloadUrl: playUrl,
+        thumbnail: thumbnail,
+        duration: '00:30',
+        resolution: resolution,
+        fps: '30fps',
+        useYtDlp: false,
+        hasCC: false,
+        folder: 'video',
+        type: 'video/mp4',
+        sizeMB: sizeMB,
+        profile: 'NovelQuick / Hongguo',
+        platform: 'NovelQuick',
+        status: 'Ready',
+        selected: true
+      }];
+    } catch (err) {
+      console.error('[scrapeNovelQuick ERROR]:', err.message);
+      return null;
+    }
+  }
+
   cleanBilibiliUrl(rawUrl) {
     try {
       let bvidMatch = rawUrl.match(/BV[0-9a-zA-Z]+/i);
@@ -1110,6 +1323,401 @@ class ScraperEngine {
       return parsed.hostname.replace('www.', '');
     } catch {
       return 'SnapKee Source';
+    }
+  }
+
+  base64decode(str) {
+    try {
+      return Buffer.from(str, 'base64').toString('utf8');
+    } catch {
+      return str;
+    }
+  }
+
+  extractPlayerAaaa(html) {
+    if (!html || typeof html !== 'string') return null;
+
+    // 1. Balanced-bracket parsing after player_aaaa
+    const startIdx = html.indexOf('player_aaaa');
+    if (startIdx !== -1) {
+      const braceStart = html.indexOf('{', startIdx);
+      if (braceStart !== -1) {
+        let depth = 0;
+        for (let i = braceStart; i < html.length; i++) {
+          if (html[i] === '{') depth++;
+          else if (html[i] === '}') {
+            depth--;
+            if (depth === 0) {
+              const jsonStr = html.slice(braceStart, i + 1);
+              try {
+                return JSON.parse(jsonStr);
+              } catch (e) {}
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Regex fallback
+    const match = html.match(/var\s+player_aaaa\s*=\s*(\{[\s\S]+?\})(?:;?\s*<\/(?:script|div)>|;\s*var|;\s*$)/m);
+    if (match) {
+      try {
+        return JSON.parse(match[1]);
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  resolvePlayerStream(playerData) {
+    if (!playerData || !playerData.url) return null;
+    let rawUrl = String(playerData.url).trim();
+    const encrypt = String(playerData.encrypt || '0');
+
+    if (encrypt === '1') {
+      try { rawUrl = unescape(rawUrl); } catch (e) {}
+    } else if (encrypt === '2') {
+      try {
+        rawUrl = unescape(this.base64decode(rawUrl));
+      } catch (e) {
+        try { rawUrl = unescape(rawUrl); } catch (err) {}
+      }
+    }
+
+    const from = String(playerData.from || '').toLowerCase();
+
+    if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
+      return rawUrl;
+    }
+
+    if (from === 'dailymotion' || from.includes('daily')) {
+      return `https://www.dailymotion.com/video/${rawUrl}`;
+    }
+
+    if (from.includes('ganjing') || from === 'engganjing' || from === 'indoganjing') {
+      return `https://www.ganjingworld.com/video/${rawUrl}`;
+    }
+
+    if (from === 'youtube' || from === 'youtu') {
+      return `https://www.youtube.com/watch?v=${rawUrl}`;
+    }
+
+    if (from === 'bilibili' || from === 'bili') {
+      return `https://www.bilibili.com/video/${rawUrl}`;
+    }
+
+    // Heuristics based on ID formatting
+    if (rawUrl.startsWith('1iso') && rawUrl.length >= 20) {
+      return `https://www.ganjingworld.com/video/${rawUrl}`;
+    }
+
+    if (/^[a-zA-Z0-9_-]{11}$/.test(rawUrl)) {
+      return `https://www.youtube.com/watch?v=${rawUrl}`;
+    }
+
+    if (/^k[a-zA-Z0-9]{15,25}$/.test(rawUrl)) {
+      return `https://www.dailymotion.com/video/${rawUrl}`;
+    }
+
+    return rawUrl;
+  }
+
+  cleanDonghuaTitle(raw) {
+    if (!raw) return 'Donghua Video';
+    return raw
+      .replace(/\s+Donghua\s+Anime\s+Episode\s+Guide.*$/i, '')
+      .replace(/\s+Streaming\s+Guide.*$/i, '')
+      .replace(/\s*-\s*Donghua\s*Fun.*$/i, '')
+      .replace(/\s*-\s*Watch\s+Donghua.*$/i, '')
+      .replace(/_Donghua.*$/i, '')
+      .trim();
+  }
+
+  cleanDonghuaTabName(tab) {
+    if (!tab) return '';
+    return tab
+      .replace(/Ads\d*/gi, '')
+      .replace(/gang\d*/gi, '')
+      .trim();
+  }
+
+  async scrapeDonghuaPlayPage(targetUrl, startId = 1) {
+    const res = await axios.get(targetUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+      },
+      timeout: 10000
+    });
+
+    const html = res.data;
+    const $ = cheerio.load(html);
+    const playerData = this.extractPlayerAaaa(html);
+    const streamUrl = this.resolvePlayerStream(playerData) || targetUrl;
+
+    const pageTitle = $('title').text().trim();
+    const vodData = playerData?.vod_data || {};
+    const seriesName = vodData.vod_name || this.cleanDonghuaTitle(pageTitle);
+
+    let epName = '';
+    if (playerData?.nid) {
+      const currentLink = $(`a[href*="nid/${playerData.nid}.html"]`).first().text().trim();
+      if (currentLink) epName = currentLink;
+    }
+    if (!epName) {
+      epName = $('.anthology-list-play li.on a, .anthology-list-play li.active a, a.cor4').text().trim();
+    }
+    if (!epName) {
+      const titleWithoutSeries = pageTitle.replace(seriesName, '');
+      const match = titleWithoutSeries.match(/(?:Part\s*\d+|EP\s*\d+|Episode\s*\d+|Movie)/i);
+      if (match) epName = match[0];
+    }
+    if (!epName && playerData?.nid) {
+      epName = `EP ${playerData.nid}`;
+    }
+
+    let fullTitle = seriesName;
+    if (epName && !seriesName.toLowerCase().includes(epName.toLowerCase())) {
+      fullTitle = `${seriesName} - ${epName}`;
+    }
+
+    let poster = $('meta[property="og:image"]').attr('content') || '';
+    if (!poster) {
+      $('script[type="application/ld+json"]').each((i, el) => {
+        try {
+          const json = JSON.parse($(el).html() || '{}');
+          const thumb = Array.isArray(json.thumbnailUrl) ? json.thumbnailUrl[0] : json.thumbnailUrl;
+          if (thumb) poster = thumb;
+        } catch (e) {}
+      });
+    }
+
+    const activeTab = $('.anthology-tab .swiper-slide.active, .anthology-tab .swiper-slide.on, .anthology-tab .swiper-slide').first().text();
+    const is4K = (playerData?.from || '').toLowerCase().includes('4k') ||
+                 fullTitle.toLowerCase().includes('4k') ||
+                 activeTab.toLowerCase().includes('4k');
+
+    if (is4K && !fullTitle.includes('[4K]')) {
+      fullTitle = `${fullTitle} [4K]`;
+    }
+
+    return [{
+      id: startId,
+      title: fullTitle,
+      url: targetUrl,
+      downloadUrl: streamUrl,
+      donghuaPlayUrl: targetUrl,
+      thumbnail: poster,
+      duration: '',
+      resolution: is4K ? '4K (2160p)' : '1080p (Full HD)',
+      fps: '25fps',
+      useYtDlp: true,
+      hasCC: true,
+      folder: 'video',
+      type: 'video/mp4 (+ Subtitle)',
+      sizeMB: is4K ? '1450.0' : '550.0',
+      profile: seriesName,
+      platform: 'DonghuaFun',
+      status: 'Ready',
+      selected: true
+    }];
+  }
+
+  async scrapeDonghuaDetail(targetUrl, startId = 1) {
+    const res = await axios.get(targetUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+      },
+      timeout: 10000
+    });
+
+    const html = res.data;
+    const $ = cheerio.load(html);
+
+    const seriesTitle = $('h1').text().trim() ||
+                        this.cleanDonghuaTitle($('meta[property="og:title"]').attr('content')) ||
+                        this.cleanDonghuaTitle($('title').text().trim());
+
+    const poster = $('meta[property="og:image"]').attr('content') ||
+                   $('.detail-pic img').attr('src') || '';
+
+    // Extract tabs
+    const tabs = [];
+    $('.anthology-tab .swiper-slide, .anthology-tab a').each((i, el) => {
+      const cloned = $(el).clone();
+      cloned.find('.badge').remove();
+      const rawTab = cloned.text().trim().replace(/\s+/g, ' ');
+      tabs.push(this.cleanDonghuaTabName(rawTab));
+    });
+
+    const playlistBoxes = $('.anthology-list-box');
+    const allGroups = [];
+
+    playlistBoxes.each((tabIdx, boxEl) => {
+      const tabName = tabs[tabIdx] || `Server ${tabIdx + 1}`;
+      const epLinks = [];
+      $(boxEl).find('a[href*="/vod/play/"]').each((epIdx, aEl) => {
+        const href = $(aEl).attr('href');
+        const text = $(aEl).text().trim().replace(/\s+/g, ' ');
+        if (href) {
+          const absUrl = urlModule.resolve(targetUrl, href);
+          epLinks.push({
+            tabIdx,
+            tabName,
+            text,
+            href: absUrl
+          });
+        }
+      });
+      if (epLinks.length > 0) {
+        allGroups.push({ tabIdx, tabName, episodes: epLinks });
+      }
+    });
+
+    // Fallback if no .anthology-list-box found
+    if (allGroups.length === 0) {
+      const epLinks = [];
+      $('a[href*="/vod/play/"]').each((i, el) => {
+        const href = $(el).attr('href');
+        const text = $(el).text().trim().replace(/\s+/g, ' ');
+        if (href) {
+          epLinks.push({
+            tabIdx: 0,
+            tabName: 'Server 1',
+            text: text || `Episode ${i + 1}`,
+            href: urlModule.resolve(targetUrl, href)
+          });
+        }
+      });
+      if (epLinks.length > 0) {
+        allGroups.push({ tabIdx: 0, tabName: 'Server 1', episodes: epLinks });
+      }
+    }
+
+    if (allGroups.length === 0) {
+      return [{
+        id: startId,
+        title: seriesTitle,
+        url: targetUrl,
+        downloadUrl: targetUrl,
+        thumbnail: poster,
+        duration: '',
+        resolution: '1080p (Full HD)',
+        fps: '25fps',
+        useYtDlp: true,
+        hasCC: true,
+        folder: 'video',
+        type: 'video/mp4 (+ Subtitle)',
+        sizeMB: '550.0',
+        profile: seriesTitle,
+        platform: 'DonghuaFun',
+        status: 'Ready',
+        selected: true
+      }];
+    }
+
+    // Determine episodes to extract
+    const totalEpsAcrossTabs = allGroups.reduce((acc, g) => acc + g.episodes.length, 0);
+    const selectedList = [];
+
+    if (totalEpsAcrossTabs <= 12) {
+      // Small movie or OVA series with few items across tabs: include all tabs with distinguishing tags
+      for (const group of allGroups) {
+        const is4K = group.tabName.toLowerCase().includes('4k');
+        const tag = is4K ? '4K' : group.tabName;
+        for (const ep of group.episodes) {
+          selectedList.push({
+            ...ep,
+            tag,
+            is4K
+          });
+        }
+      }
+    } else {
+      // For large episodic series (e.g. 50-200 episodes), use the tab with the most episodes
+      let bestGroup = allGroups[0];
+      for (const g of allGroups) {
+        if (g.episodes.length > bestGroup.episodes.length) {
+          bestGroup = g;
+        }
+      }
+      const is4K = bestGroup.tabName.toLowerCase().includes('4k');
+      for (const ep of bestGroup.episodes) {
+        selectedList.push({
+          ...ep,
+          tag: is4K ? '4K' : '',
+          is4K
+        });
+      }
+    }
+
+    // Natural numerical sort for episodes within each tab
+    selectedList.sort((a, b) => {
+      if (a.tabIdx !== b.tabIdx) return a.tabIdx - b.tabIdx;
+      const numA = parseInt((a.text.match(/\d+/) || [0])[0], 10);
+      const numB = parseInt((b.text.match(/\d+/) || [0])[0], 10);
+      if (numA && numB && numA !== numB) return numA - numB;
+      return a.text.localeCompare(b.text);
+    });
+
+    // Concurrently resolve stream URLs with a batch size of 5
+    const results = [];
+    const batchSize = 5;
+    for (let i = 0; i < selectedList.length; i += batchSize) {
+      const batch = selectedList.slice(i, i + batchSize);
+      await Promise.all(batch.map(async (item, batchIdx) => {
+        const itemIdx = i + batchIdx;
+        let streamUrl = item.href;
+        try {
+          const pRes = await axios.get(item.href, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            timeout: 8000
+          });
+          const pData = this.extractPlayerAaaa(pRes.data);
+          const resolved = this.resolvePlayerStream(pData);
+          if (resolved) streamUrl = resolved;
+        } catch (e) {}
+
+        const tagSuffix = item.tag ? ` [${item.tag}]` : '';
+        const titleWithEp = `${seriesTitle} - ${item.text}${tagSuffix}`;
+
+        results[itemIdx] = {
+          id: startId + itemIdx,
+          title: titleWithEp,
+          url: item.href,
+          downloadUrl: streamUrl,
+          donghuaPlayUrl: item.href,
+          thumbnail: poster,
+          duration: '',
+          resolution: item.is4K ? '4K (2160p)' : '1080p (Full HD)',
+          fps: '25fps',
+          useYtDlp: true,
+          hasCC: true,
+          folder: 'video',
+          type: 'video/mp4 (+ Subtitle)',
+          sizeMB: item.is4K ? '1450.0' : '550.0',
+          profile: seriesTitle,
+          platform: 'DonghuaFun',
+          status: 'Ready',
+          selected: true
+        };
+      }));
+    }
+
+    return results.filter(Boolean);
+  }
+
+  async scrapeDonghua(targetUrl, startId = 1) {
+    try {
+      const lower = targetUrl.toLowerCase();
+      if (lower.includes('/vod/play/')) {
+        return await this.scrapeDonghuaPlayPage(targetUrl, startId);
+      }
+      return await this.scrapeDonghuaDetail(targetUrl, startId);
+    } catch (err) {
+      console.error('[scrapeDonghua ERROR]:', err && err.message);
+      return null;
     }
   }
 }

@@ -35,18 +35,111 @@ const USER_AGENTS_POOL = [
 // High-performance Cookie cache to eliminate file I/O latency on repeated chunk/stream operations
 const COOKIE_PARSER_CACHE = new Map();
 
+// High-precision Token-Bucket Bandwidth Limiter & QoS Pacer
+// Ensures the app utilizes maximum safe Wi-Fi speed without causing bufferbloat or lagging other devices
+class BandwidthLimiter {
+  constructor(limitMBps = 0) {
+    this.setLimit(limitMBps);
+  }
+
+  setLimit(limitMBps) {
+    this.limitMBps = Math.max(0, parseFloat(limitMBps) || 0);
+    this.bytesPerSec = this.limitMBps > 0 ? this.limitMBps * 1024 * 1024 : 0;
+    // Burst capacity: smooth burst between 256KB and 2MB (or 200ms worth of data)
+    this.maxBurst = this.bytesPerSec > 0 ? Math.max(256 * 1024, Math.min(2 * 1024 * 1024, this.bytesPerSec * 0.2)) : 0;
+    this.tokens = this.maxBurst;
+    this.lastRefill = Date.now();
+  }
+
+  isEnabled() {
+    return this.bytesPerSec > 0;
+  }
+
+  consume(bytes) {
+    if (this.bytesPerSec <= 0) return 0;
+
+    const now = Date.now();
+    const elapsedSec = Math.max(0, (now - this.lastRefill) / 1000);
+    this.lastRefill = now;
+
+    // Refill tokens according to elapsed time
+    this.tokens = Math.min(this.maxBurst, this.tokens + (elapsedSec * this.bytesPerSec));
+    this.tokens -= bytes;
+
+    if (this.tokens < 0) {
+      // Calculate delay in ms needed to refill back to zero
+      const deficit = -this.tokens;
+      const delayMs = Math.ceil((deficit / this.bytesPerSec) * 1000);
+      return Math.min(500, Math.max(2, delayMs));
+    }
+
+    return 0;
+  }
+}
+
 class DownloaderEngine extends EventEmitter {
   constructor() {
     super();
     this.activeQueue = [];
+    this.globalQueue = [];
+    this.localQueue = [];
     this.runningCount = 0;
+    this.runningGlobalCount = 0;
+    this.runningLocalCount = 0;
     this.completedCount = 0;
     this.totalCount = 0;
-    this.concurrencyLimit = 2;
+    this.globalConcurrencyLimit = 2; // 2 videos for global speed (like bilibili)
+    this.localConcurrencyLimit = 2;  // 2 videos for local speed (like youtube)
+    this.concurrencyLimit = 4;       // 2 + 2 = 4 together per time
     this.isCancelled = false;
     this.activeControllers = new Map();
     this.speedMetrics = new Map(); // id -> bytes per second
     this.speedTimer = null;
+    this.bandwidthLimiter = new BandwidthLimiter();
+  }
+
+  getItemSpeedPool(item) {
+    if (!item) return 'global';
+    if (item.speedPool === 'local' || item.speedPool === 'global') return item.speedPool;
+    const targetUrlLower = String(item.downloadUrl || item.url || '').toLowerCase();
+    const platformLower = String(item.platform || '').toLowerCase();
+    const extractorLower = String(item.extractor || item.extractor_key || '').toLowerCase();
+
+    // Local speed pool (YouTube, Facebook, TikTok, Instagram, Twitter/X, Threads)
+    const isDomain = (d) => targetUrlLower.includes(`//${d}`) || targetUrlLower.includes(`.${d}`);
+    if (
+      platformLower.includes('youtube') || targetUrlLower.includes('youtube.com') || targetUrlLower.includes('youtu.be') || extractorLower.includes('youtube') ||
+      platformLower.includes('facebook') || targetUrlLower.includes('facebook.com') || targetUrlLower.includes('fb.watch') || isDomain('fb.com') || extractorLower.includes('facebook') ||
+      platformLower.includes('tiktok') || targetUrlLower.includes('tiktok.com') || extractorLower.includes('tiktok') ||
+      platformLower.includes('instagram') || targetUrlLower.includes('instagram.com') || extractorLower.includes('instagram') ||
+      platformLower === 'x' || platformLower.includes('twitter') || platformLower.includes('twitter/x') || targetUrlLower.includes('twitter.com') || isDomain('x.com') ||
+      platformLower.includes('threads') || targetUrlLower.includes('threads.net')
+    ) {
+      return 'local';
+    }
+
+    // Global speed pool (Bilibili, overseas and Chinese platforms)
+    return 'global';
+  }
+
+  incrementRunning(item) {
+    const pool = this.getItemSpeedPool(item);
+    if (pool === 'local') {
+      this.runningLocalCount++;
+    } else {
+      this.runningGlobalCount++;
+    }
+    this.runningCount = this.runningGlobalCount + this.runningLocalCount;
+  }
+
+  decrementRunning(item) {
+    const pool = this.getItemSpeedPool(item);
+    if (pool === 'local') {
+      this.runningLocalCount = Math.max(0, this.runningLocalCount - 1);
+    } else {
+      this.runningGlobalCount = Math.max(0, this.runningGlobalCount - 1);
+    }
+    this.runningCount = this.runningGlobalCount + this.runningLocalCount;
   }
 
   emitLog(level, message, extra = {}) {
@@ -89,52 +182,129 @@ class DownloaderEngine extends EventEmitter {
     }
   }
 
+  async resolveDonghuaStreamUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return null;
+    const lower = rawUrl.toLowerCase();
+    if (!lower.includes('donghuafun') && !lower.includes('/vod/play/')) return null;
+
+    try {
+      const urlModule = require('url');
+      let playUrl = rawUrl;
+      if (lower.includes('/vod/detail/')) {
+        const dRes = await axios.get(rawUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+          timeout: 8000
+        });
+        const match = dRes.data.match(/href="([^"]*\/vod\/play\/[^"]*)"/i);
+        if (match) {
+          playUrl = urlModule.resolve(rawUrl, match[1]);
+        }
+      }
+
+      const pRes = await axios.get(playUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        timeout: 8000
+      });
+      const html = pRes.data;
+
+      let pData = null;
+      const startIdx = html.indexOf('player_aaaa');
+      if (startIdx !== -1) {
+        const braceStart = html.indexOf('{', startIdx);
+        if (braceStart !== -1) {
+          let depth = 0;
+          for (let i = braceStart; i < html.length; i++) {
+            if (html[i] === '{') depth++;
+            else if (html[i] === '}') {
+              depth--;
+              if (depth === 0) {
+                try { pData = JSON.parse(html.slice(braceStart, i + 1)); } catch (e) {}
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (!pData) {
+        const match = html.match(/var\s+player_aaaa\s*=\s*(\{[\s\S]+?\})(?:;?\s*<\/(?:script|div)>|;\s*var|;\s*$)/m);
+        if (match) {
+          try { pData = JSON.parse(match[1]); } catch (e) {}
+        }
+      }
+
+      if (pData && pData.url) {
+        let stream = String(pData.url).trim();
+        const encrypt = String(pData.encrypt || '0');
+        if (encrypt === '1') {
+          try { stream = unescape(stream); } catch (e) {}
+        } else if (encrypt === '2') {
+          try {
+            stream = unescape(Buffer.from(stream, 'base64').toString('utf8'));
+          } catch (e) {
+            try { stream = unescape(stream); } catch (err) {}
+          }
+        }
+        const from = String(pData.from || '').toLowerCase();
+        if (stream.startsWith('http://') || stream.startsWith('https://')) return stream;
+        if (from === 'dailymotion' || from.includes('daily')) return `https://www.dailymotion.com/video/${stream}`;
+        if (from.includes('ganjing')) return `https://www.ganjingworld.com/video/${stream}`;
+        if (from === 'youtube' || from === 'youtu') return `https://www.youtube.com/watch?v=${stream}`;
+        if (from === 'bilibili' || from === 'bili') return `https://www.bilibili.com/video/${stream}`;
+        if (stream.startsWith('1iso') && stream.length >= 20) return `https://www.ganjingworld.com/video/${stream}`;
+        if (/^[a-zA-Z0-9_-]{11}$/.test(stream)) return `https://www.youtube.com/watch?v=${stream}`;
+        if (/^k[a-zA-Z0-9]{15,25}$/.test(stream)) return `https://www.dailymotion.com/video/${stream}`;
+        return stream;
+      }
+    } catch (e) {}
+    return null;
+  }
+
   getBilibiliDashTuning(totalBytes, streamType, settings = {}) {
     const mode = String(settings.bilibiliMode || 'fast').toLowerCase();
+    const isWifiFriendly = settings.wifiFriendly !== false && settings.speedLimitMode !== 'unlimited';
 
-    // Conservative connection limits to prevent Bilibili CDN IP throttling or connection drops on long (2-3h+) videos
-    const isLongVideo = totalBytes > 300 * 1024 * 1024;
+    // Optimized multi-threaded tuning for Bilibili streams (unlocked up to 16 workers for high speed)
     const presets = {
       stable: {
-        videoWorkers: isLongVideo ? 3 : 4,
-        audioWorkers: 1,
+        videoWorkers: 4,
+        audioWorkers: 2,
         minVideoChunkMB: 4,
         maxVideoChunkMB: 16,
         minAudioChunkMB: 2,
         maxAudioChunkMB: 8,
-        staggerMs: 40,
-        flushIntervalMs: 50,
-        flushThresholdKB: 512,
-        maxBufferedKB: 2048,
-        retryBackoffMs: 800,
-        maxChunkRetries: 25
-      },
-      balanced: {
-        videoWorkers: isLongVideo ? 4 : 6,
-        audioWorkers: 2,
-        minVideoChunkMB: 4,
-        maxVideoChunkMB: 20,
-        minAudioChunkMB: 2,
-        maxAudioChunkMB: 10,
-        staggerMs: 25,
+        staggerMs: isWifiFriendly ? 40 : 20,
         flushIntervalMs: 40,
         flushThresholdKB: 1024,
         maxBufferedKB: 4096,
         retryBackoffMs: 600,
         maxChunkRetries: 25
       },
-      fast: {
-        videoWorkers: isLongVideo ? 4 : 6,
+      balanced: {
+        videoWorkers: isWifiFriendly ? 6 : 10,
         audioWorkers: 2,
         minVideoChunkMB: 4,
         maxVideoChunkMB: 24,
         minAudioChunkMB: 2,
         maxAudioChunkMB: 12,
-        staggerMs: 15,
+        staggerMs: isWifiFriendly ? 30 : 15,
         flushIntervalMs: 30,
-        flushThresholdKB: 1024,
-        maxBufferedKB: 4096,
+        flushThresholdKB: isWifiFriendly ? 1024 : 2048,
+        maxBufferedKB: isWifiFriendly ? 4096 : 8192,
         retryBackoffMs: 500,
+        maxChunkRetries: 25
+      },
+      fast: {
+        videoWorkers: isWifiFriendly ? 8 : 16,
+        audioWorkers: 4,
+        minVideoChunkMB: 4,
+        maxVideoChunkMB: 32,
+        minAudioChunkMB: 2,
+        maxAudioChunkMB: 16,
+        staggerMs: isWifiFriendly ? 20 : 10,
+        flushIntervalMs: 20,
+        flushThresholdKB: isWifiFriendly ? 1024 : 2048,
+        maxBufferedKB: isWifiFriendly ? 4096 : 8192,
+        retryBackoffMs: 400,
         maxChunkRetries: 25
       }
     };
@@ -458,41 +628,40 @@ class DownloaderEngine extends EventEmitter {
 
     let rawCookies = (item && item.cookies) || (settings && (settings.cookies || settings.cookieFile)) || '';
 
+    const findCookiesForPlatform = (type) => {
+      const filename = type === 'youtube' ? 'www.youtube.com_cookies.txt' : 'www.bilibili.com_cookies.txt';
+      const altFilename = type === 'youtube' ? 'youtube_cookies.txt' : 'bilibili_cookies.txt';
+      const rawDir = (typeof rawCookies === 'string' && rawCookies.trim() && path.isAbsolute(rawCookies.trim())) ? path.dirname(rawCookies.trim()) : null;
+      const candidates = [
+        rawDir ? path.join(rawDir, filename) : null,
+        rawDir ? path.join(rawDir, altFilename) : null,
+        process.resourcesPath ? path.join(process.resourcesPath, filename) : null,
+        process.execPath ? path.join(path.dirname(process.execPath), 'resources', filename) : null,
+        process.execPath ? path.join(path.dirname(process.execPath), filename) : null,
+        path.join(process.cwd(), filename),
+        path.join(__dirname, '..', filename),
+        path.join(__dirname, filename),
+        path.join('D:\\PROJECT', filename),
+        path.join('D:\\PROJECT\\DOWNLOAD\\snapkee-app', filename)
+      ].filter(Boolean);
+      return candidates.find(p => fs.existsSync(p)) || '';
+    };
+
     // If cookies were provided but belong to another platform, perform intelligent domain mapping
     if (typeof rawCookies === 'string' && rawCookies.trim()) {
       const rawLower = rawCookies.toLowerCase();
       if (isYouTube && (rawLower.includes('bilibili') || rawLower.includes('b23'))) {
-        const possibleYtCookies = [
-          path.join(process.cwd(), 'www.youtube.com_cookies.txt'),
-          path.join(__dirname, '..', 'www.youtube.com_cookies.txt')
-        ];
-        const found = possibleYtCookies.find(p => fs.existsSync(p));
-        rawCookies = found || '';
+        rawCookies = findCookiesForPlatform('youtube');
       } else if (isBilibili && rawLower.includes('youtube')) {
-        const possibleBiliCookies = [
-          path.join(process.cwd(), 'www.bilibili.com_cookies.txt'),
-          path.join(__dirname, '..', 'www.bilibili.com_cookies.txt')
-        ];
-        const found = possibleBiliCookies.find(p => fs.existsSync(p));
-        rawCookies = found || '';
+        rawCookies = findCookiesForPlatform('bilibili');
       } else if (!isBilibili && !isYouTube && (rawLower.includes('bilibili') || rawLower.includes('youtube') || rawLower.includes('b23') || rawLower.includes('google'))) {
         rawCookies = '';
       }
     } else {
       if (isBilibili) {
-        const possibleBiliCookies = [
-          path.join(process.cwd(), 'www.bilibili.com_cookies.txt'),
-          path.join(__dirname, '..', 'www.bilibili.com_cookies.txt')
-        ];
-        const found = possibleBiliCookies.find(p => fs.existsSync(p));
-        if (found) rawCookies = found;
+        rawCookies = findCookiesForPlatform('bilibili');
       } else if (isYouTube) {
-        const possibleYtCookies = [
-          path.join(process.cwd(), 'www.youtube.com_cookies.txt'),
-          path.join(__dirname, '..', 'www.youtube.com_cookies.txt')
-        ];
-        const found = possibleYtCookies.find(p => fs.existsSync(p));
-        if (found) rawCookies = found;
+        rawCookies = findCookiesForPlatform('youtube');
       }
     }
 
@@ -535,7 +704,16 @@ class DownloaderEngine extends EventEmitter {
           }
         });
         const headerStr = cookiePairs.length > 0 ? cookiePairs.join('; ') : null;
-        const result = { cookieFile: resolvedPath, cookieHeader: headerStr };
+        let finalPath = resolvedPath;
+        if (resolvedPath.includes('app.asar')) {
+          try {
+            const os = require('os');
+            const extractedCookiePath = path.join(os.tmpdir(), `snapkee_${platformKey}_cookies.txt`);
+            fs.writeFileSync(extractedCookiePath, content, 'utf8');
+            finalPath = extractedCookiePath;
+          } catch (err) {}
+        }
+        const result = { cookieFile: finalPath, cookieHeader: headerStr };
         COOKIE_PARSER_CACHE.set(cacheKey, result);
         return result;
       } catch (e) {
@@ -600,13 +778,173 @@ class DownloaderEngine extends EventEmitter {
     return String(item?.id || 'video');
   }
 
-  cleanMovieTitle(item) {
+  parseTimeToSeconds(input, totalSec = 0) {
+    if (input === null || input === undefined || input === '') return null;
+    const str = String(input).trim().toLowerCase();
+    if (str === 'inf' || str === 'end' || str === 'last' || str === 'infinity') return 'inf';
+
+    const isNegative = str.startsWith('-');
+    const cleanStr = isNegative ? str.slice(1) : str;
+
+    let total = 0;
+    if (cleanStr.includes(':')) {
+      const parts = cleanStr.split(':').map(p => parseFloat(p) || 0);
+      if (parts.length === 3) {
+        total = parts[0] * 3600 + parts[1] * 60 + parts[2];
+      } else if (parts.length === 2) {
+        total = parts[0] * 60 + parts[1];
+      }
+    } else if (/[hms]/.test(cleanStr)) {
+      const h = cleanStr.match(/(\d+(?:\.\d+)?)\s*h/);
+      const m = cleanStr.match(/(\d+(?:\.\d+)?)\s*m/);
+      const s = cleanStr.match(/(\d+(?:\.\d+)?)\s*s/);
+      if (h) total += parseFloat(h[1]) * 3600;
+      if (m) total += parseFloat(m[1]) * 60;
+      if (s) total += parseFloat(s[1]);
+    } else if (!isNaN(cleanStr)) {
+      total = parseFloat(cleanStr);
+    }
+
+    if (isNegative) {
+      return totalSec > 0 ? Math.max(0, totalSec - total) : -total;
+    }
+    return Math.max(0, Math.round(total));
+  }
+
+  formatSecondsToTime(sec, forceHours = true) {
+    if (sec === 'inf' || sec === Infinity || sec === null || sec === undefined) return 'inf';
+    if (isNaN(sec)) return '00:00:00';
+    const s = Math.max(0, Math.round(sec));
+    const hrs = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = s % 60;
+    if (forceHours || hrs > 0) {
+      return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+
+  getEffectiveTimeRange(item, settings = {}) {
+    if (item?.timeRange && item.timeRange.enabled) {
+      return item.timeRange;
+    }
+    if (settings?.timeRange && settings.timeRange.enabled) {
+      return settings.timeRange;
+    }
+    return null;
+  }
+
+  formatDownloadSection(timeRange, itemDurationSec = 0) {
+    if (!timeRange || !timeRange.enabled) return null;
+    let startSec = this.parseTimeToSeconds(timeRange.start, itemDurationSec);
+    let endSec = this.parseTimeToSeconds(timeRange.end, itemDurationSec);
+
+    if (startSec === null || startSec === undefined) startSec = 0;
+    if (endSec === null || endSec === undefined || endSec === '' || timeRange.toEnd) {
+      endSec = (itemDurationSec && itemDurationSec > 0) ? itemDurationSec : 'inf';
+    }
+
+    let startStr = typeof startSec === 'number' ? (startSec < 0 ? String(startSec) : this.formatSecondsToTime(startSec)) : String(startSec);
+    let endStr = (endSec === 'inf' || endSec === Infinity) ? 'inf' : (typeof endSec === 'number' ? this.formatSecondsToTime(endSec) : String(endSec));
+
+    return `*${startStr}-${endStr}`;
+  }
+
+  formatTimeRangeFilenameTag(timeRange, item = {}) {
+    const durSec = item.durationSeconds || this.parseTimeToSeconds(item.duration) || 0;
+    let startSec = this.parseTimeToSeconds(timeRange.start, durSec);
+    let endSec = this.parseTimeToSeconds(timeRange.end, durSec);
+    if (startSec === null || startSec === undefined) startSec = 0;
+
+    const startStr = typeof startSec === 'number' ? this.formatSecondsToTime(startSec).replace(/:/g, '.') : String(timeRange.start || '0').replace(/:/g, '.');
+    let endStr = 'End';
+    if (endSec !== 'inf' && endSec !== Infinity && endSec !== null && !timeRange.toEnd) {
+      endStr = typeof endSec === 'number' ? this.formatSecondsToTime(endSec).replace(/:/g, '.') : String(timeRange.end || 'End').replace(/:/g, '.');
+    }
+    return `${startStr}-${endStr}`;
+  }
+
+  parseSrtTimestamp(ts) {
+    if (!ts) return 0;
+    const parts = ts.trim().split(/[:,]/);
+    if (parts.length < 4) return 0;
+    return parseInt(parts[0], 10) * 3600 +
+           parseInt(parts[1], 10) * 60 +
+           parseInt(parts[2], 10) +
+           parseInt(parts[3], 10) / 1000;
+  }
+
+  formatSrtTimestamp(sec) {
+    const s = Math.max(0, sec || 0);
+    const hrs = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = Math.floor(s % 60);
+    const ms = Math.round((s - Math.floor(s)) * 1000);
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+  }
+
+  trimSubtitleToTimeRange(srtFilePath, timeRange, totalDurSec = 0) {
+    try {
+      if (!fs.existsSync(srtFilePath)) return false;
+      const startSec = this.parseTimeToSeconds(timeRange.start, totalDurSec) || 0;
+      let endSec = this.parseTimeToSeconds(timeRange.end, totalDurSec);
+      if (endSec === null || endSec === undefined || timeRange.toEnd) endSec = 'inf';
+
+      const content = fs.readFileSync(srtFilePath, 'utf8');
+      const blocks = content.split(/\r?\n\r?\n/);
+      const newBlocks = [];
+      let counter = 1;
+
+      for (const block of blocks) {
+        const lines = block.trim().split(/\r?\n/);
+        if (lines.length < 2) continue;
+        const timeLineIndex = lines.findIndex(l => l.includes('-->'));
+        if (timeLineIndex === -1) continue;
+
+        const [startRaw, endRaw] = lines[timeLineIndex].split('-->').map(s => s.trim());
+        const itemStart = this.parseSrtTimestamp(startRaw);
+        const itemEnd = this.parseSrtTimestamp(endRaw);
+
+        if (itemEnd < startSec) continue;
+        if (endSec !== 'inf' && itemStart > endSec) continue;
+
+        const shiftedStart = Math.max(0, itemStart - startSec);
+        const shiftedEnd = Math.max(shiftedStart + 0.1, itemEnd - startSec);
+
+        const textLines = lines.slice(timeLineIndex + 1);
+        newBlocks.push(`${counter++}\n${this.formatSrtTimestamp(shiftedStart)} --> ${this.formatSrtTimestamp(shiftedEnd)}\n${textLines.join('\n')}`);
+      }
+
+      if (newBlocks.length > 0) {
+        fs.writeFileSync(srtFilePath, newBlocks.join('\n\n') + '\n', 'utf8');
+        this.emitLog('info', `Synchronized subtitle for custom section [start offset: -${this.formatSecondsToTime(startSec)}, ${newBlocks.length} cues preserved]`, {
+          filePath: srtFilePath
+        });
+      }
+      return true;
+    } catch (e) {
+      this.emitLog('warn', `Failed to trim subtitle: ${e.message}`, { filePath: srtFilePath });
+      return false;
+    }
+  }
+
+  cleanMovieTitle(item, settings = {}) {
     const fallbackId = this.getVideoFilenameFallback(item);
     let raw = (item?.title || item?.movieName || '').trim();
     if (!raw || raw.toLowerCase().startsWith('media stream') || raw.toLowerCase() === 'video') {
       raw = `${item?.platform || 'Video'}_${fallbackId}`;
     }
-    return this.sanitizeFilename(raw, fallbackId).substring(0, 150);
+    let sanitized = this.sanitizeFilename(raw, fallbackId).substring(0, 150);
+
+    const effectiveTimeRange = this.getEffectiveTimeRange(item, settings);
+    if (effectiveTimeRange && effectiveTimeRange.enabled) {
+      const rangeTag = this.formatTimeRangeFilenameTag(effectiveTimeRange, item);
+      if (rangeTag) {
+        sanitized = `${sanitized} [${rangeTag}]`;
+      }
+    }
+
+    return sanitized;
   }
 
   getJsRuntimeArg() {
@@ -995,7 +1333,6 @@ class DownloaderEngine extends EventEmitter {
         // Fast trailer & packet integrity verification using FFmpeg
         const proc = spawn(ffmpegExe, [
           '-v', 'error',
-          '-xerror',
           '-sseof', '-10',
           '-i', filePath,
           '-f', 'null',
@@ -1014,33 +1351,55 @@ class DownloaderEngine extends EventEmitter {
 
         proc.on('close', (code) => {
           clearTimeout(timer);
-          if (code === 0 && !stderr.trim()) {
+          const fatalCorrupt = /(?:moov atom not found|Invalid data found when processing input|EBADF|Header missing|Truncated|Invalid NAL unit)/i.test(stderr);
+          if (code === 0 && !fatalCorrupt) {
+            try {
+              const { spawnSync } = require('child_process');
+              const probe = spawnSync(ffmpegExe, ['-i', filePath], { encoding: 'utf8' });
+              const info = (probe.stderr || '') + (probe.stdout || '');
+              const hasVideo = /Stream #\d+:\d+.*Video:/i.test(info);
+              const durMatch = info.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/i);
+              if (hasVideo && durMatch) {
+                const durSec = parseInt(durMatch[1], 10) * 3600 + parseInt(durMatch[2], 10) * 60 + parseFloat(durMatch[3]);
+                if (durSec > 20) {
+                  const testPts = [Math.floor(durSec * 0.5), Math.floor(durSec * 0.8)];
+                  for (const pt of testPts) {
+                    const chk = spawnSync(ffmpegExe, ['-v', 'error', '-ss', String(pt), '-i', filePath, '-vframes', '1', '-f', 'null', '-'], { encoding: 'utf8' });
+                    if (chk.status !== 0 || (chk.stderr && /Invalid NAL unit|missing picture/i.test(chk.stderr))) {
+                      return resolve(false);
+                    }
+                  }
+                }
+              }
+            } catch (e) {}
             resolve(true);
           } else {
-            const isCorrupt = /(?:Invalid data found|moov atom not found|corrupt|Invalid OBU|EBADF|Header missing|Truncated|contradictionary)/i.test(stderr);
-            if (isCorrupt) {
+            // Check if file is simply shorter than 10 seconds
+            const probeProc = spawn(ffmpegExe, ['-i', filePath]);
+            let probeErr = '';
+            const probeTimer = setTimeout(() => {
+              try { probeProc.kill('SIGKILL'); } catch (e) {}
               resolve(false);
-            } else {
-              // Quick probe check for duration and streams (handles very short files <10s)
-              const probeProc = spawn(ffmpegExe, ['-i', filePath]);
-              let probeErr = '';
-              const probeTimer = setTimeout(() => {
-                try { probeProc.kill('SIGKILL'); } catch (e) {}
-                resolve(stats.size > 500 * 1024);
-              }, 5000);
-              probeProc.stderr?.on('data', (pd) => probeErr += pd.toString());
-              probeProc.on('close', () => {
-                clearTimeout(probeTimer);
-                const hasDuration = /Duration:\s*(\d+):(\d+):(\d+)/i.test(probeErr);
-                const hasStream = /Stream #.*(?:Video|Audio):/i.test(probeErr);
-                const hasFatalAtom = /(?:moov atom not found|Invalid data found)/i.test(probeErr);
-                resolve(hasDuration && hasStream && !hasFatalAtom);
-              });
-              probeProc.on('error', () => {
-                clearTimeout(probeTimer);
-                resolve(stats.size > 500 * 1024);
-              });
-            }
+            }, 5000);
+            probeProc.stderr?.on('data', (pd) => probeErr += pd.toString());
+            probeProc.on('close', () => {
+              clearTimeout(probeTimer);
+              const durMatch = probeErr.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/i);
+              if (durMatch) {
+                const durSec = parseInt(durMatch[1], 10) * 3600 + parseInt(durMatch[2], 10) * 60 + parseFloat(durMatch[3]);
+                if (durSec <= 10) {
+                  const { spawnSync } = require('child_process');
+                  const quickRes = spawnSync(ffmpegExe, ['-v', 'error', '-ss', '0', '-i', filePath, '-vframes', '1', '-f', 'null', '-']);
+                  return resolve(quickRes.status === 0);
+                }
+              }
+              // For videos > 10s, if trailer packet decode failed, the file is truncated or corrupted mid-stream!
+              resolve(false);
+            });
+            probeProc.on('error', () => {
+              clearTimeout(probeTimer);
+              resolve(false);
+            });
           }
         });
 
@@ -1056,7 +1415,7 @@ class DownloaderEngine extends EventEmitter {
 
   buildDownloadPaths(item, settings) {
     const targetDir = this.getTargetDir(item, settings);
-    const baseFilenameWithoutExt = this.cleanMovieTitle(item);
+    const baseFilenameWithoutExt = this.cleanMovieTitle(item, settings);
     const ext = item.type && item.type.includes('mp3') ? '.mp3' : '.mp4';
     const filePath = path.join(targetDir, `${baseFilenameWithoutExt}${ext}`);
     return { targetDir, baseFilenameWithoutExt, filePath, ext };
@@ -1174,6 +1533,13 @@ class DownloaderEngine extends EventEmitter {
         thumbUrl = `https:${thumbUrl}`;
       }
 
+      if (thumbUrl.includes('img.php?url=')) {
+        const unwrapped = thumbUrl.split('img.php?url=')[1];
+        if (unwrapped && unwrapped.startsWith('http')) {
+          thumbUrl = decodeURIComponent(unwrapped);
+        }
+      }
+
       const headers = {
         'User-Agent': this.getModernUserAgent(settings, item),
         'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
@@ -1182,6 +1548,12 @@ class DownloaderEngine extends EventEmitter {
         headers['Referer'] = this.getBilibiliReferer(item);
       } else if (isYt) {
         headers['Referer'] = 'https://www.youtube.com/';
+      } else if (thumbUrl.includes('doubanio.com')) {
+        headers['Referer'] = 'https://movie.douban.com/';
+      } else if (thumbUrl.includes('donghuafun')) {
+        headers['Referer'] = 'https://donghuafun.com/';
+      } else if (thumbUrl.includes('byteimg.com') || item.platform === 'NovelQuick') {
+        headers['Referer'] = 'https://novelquickapp.com/';
       }
 
       // Download thumbnail with YouTube maxres -> hq fallback
@@ -1233,7 +1605,7 @@ class DownloaderEngine extends EventEmitter {
 
   async finalizeCompletedItem(item, filePath, settings, status = 'Completed') {
     this.completedCount++;
-    this.runningCount--;
+    this.decrementRunning(item);
     this.activeControllers.delete(item.id);
     this.speedMetrics.delete(item.id);
     item.filePath = filePath;
@@ -1282,11 +1654,12 @@ class DownloaderEngine extends EventEmitter {
       filePath,
       thumbnailPath: item.thumbnailFile || null
     });
-    this.processNextInQueue(settings);
+    this.checkAndFillPools(settings);
+    this.checkQueueCompleted();
   }
 
   async ensureSubtitlesDownloaded(item, targetDir, baseFilenameWithoutExt, settings) {
-    if (settings.downloadSubtitles === false) return null;
+    if (settings.downloadSubtitles === false || item.platform === 'NovelQuick') return null;
 
     const defaultSrtPath = path.join(targetDir, `${baseFilenameWithoutExt}.srt`);
     if (fs.existsSync(defaultSrtPath) && fs.statSync(defaultSrtPath).size > 100) {
@@ -1327,7 +1700,7 @@ class DownloaderEngine extends EventEmitter {
 
   async downloadSubtitleOnly(item, settings) {
     const targetDir = this.getTargetDir(item, settings);
-    const baseFilenameWithoutExt = this.cleanMovieTitle(item);
+    const baseFilenameWithoutExt = this.cleanMovieTitle(item, settings);
     const subtitlePath = path.join(targetDir, `${baseFilenameWithoutExt}.srt`);
     if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
     const targetUrl = item.downloadUrl || item.url || '';
@@ -1346,7 +1719,14 @@ class DownloaderEngine extends EventEmitter {
         'Referer': this.getBilibiliReferer(item),
         ...(cookieHeader ? { 'Cookie': cookieHeader } : {})
       }, cid, subtitlePath, bvidMatch, aidMatch, pageNum, settings);
-      return files && files.length > 0 ? files[0] : null;
+      if (files && files.length > 0) {
+        const effectiveTimeRange = this.getEffectiveTimeRange(item, settings);
+        if (effectiveTimeRange) {
+          this.trimSubtitleToTimeRange(files[0], effectiveTimeRange, item.durationSeconds || this.parseTimeToSeconds(item.duration));
+        }
+        return files[0];
+      }
+      return null;
     }
 
     const { spawn } = require('child_process');
@@ -1370,7 +1750,9 @@ class DownloaderEngine extends EventEmitter {
       '--convert-subs', 'srt',
       '--windows-filenames',
       '-P', `subtitle:${tempSubDir}`,
-      '-o', path.join(tempSubDir, `${baseFilenameWithoutExt}.%(ext)s`)
+      '-o', path.join(tempSubDir, `${baseFilenameWithoutExt}.%(ext)s`),
+      '--socket-timeout', '30',
+      '--impersonate', 'chrome'
     ];
     if (cookieFile && fs.existsSync(cookieFile)) args.push('--cookies', cookieFile);
     args.push(targetUrl);
@@ -1390,6 +1772,10 @@ class DownloaderEngine extends EventEmitter {
       proc.on('close', code => {
         const normalized = this.normalizeYtDlpSubtitleOutput(targetDir, baseFilenameWithoutExt, preferred, settings, tempSubDir);
         if (normalized && fs.existsSync(normalized)) {
+          const effectiveTimeRange = this.getEffectiveTimeRange(item, settings);
+          if (effectiveTimeRange) {
+            this.trimSubtitleToTimeRange(normalized, effectiveTimeRange, item.durationSeconds || this.parseTimeToSeconds(item.duration));
+          }
           this.emitLog('info', `Saved 1 subtitle-only file: ${path.basename(normalized)}`, { itemId: item.id, filePath: normalized });
           resolve(normalized);
         } else {
@@ -1400,20 +1786,81 @@ class DownloaderEngine extends EventEmitter {
     });
   }
 
-  startQueue(items, settings) {
+  startQueue(items, settings = {}) {
     this.cancelAll(); // Clean up any previous runs
     this.isCancelled = false;
-    // Keep item concurrency conservative to avoid throttling and server-side rejection.
-    this.concurrencyLimit = Math.min(4, Math.max(1, parseInt(settings.itemConcurrency || 2, 10)));
+
+    // Smart Wi-Fi QoS & Bandwidth Cap Configuration
+    const speedLimitMode = String(settings.speedLimitMode || 'unlimited');
+    let speedLimitMB = 0;
+    if (speedLimitMode === '10' || speedLimitMode === 'wifi-balanced') {
+      speedLimitMB = 10; // 10 MB/s (80 Mbps) - Perfect 80% sweet-spot for 100M broadband (leaves ~20 Mbps clean headroom!)
+    } else if (speedLimitMode === '11.5' || speedLimitMode === 'wifi-turbo') {
+      speedLimitMB = 11.5; // 11.5 MB/s (~92 Mbps) - Turbo for 100M line
+    } else if (speedLimitMode === '8' || speedLimitMode === 'wifi-safe') {
+      speedLimitMB = 8; // 8 MB/s (~64 Mbps) - Ultra safe for gaming / Zoom calls
+    } else if (speedLimitMode === '20') {
+      speedLimitMB = 20; // 20 MB/s (~160 Mbps) for 200M plans
+    } else if (speedLimitMode === '30') {
+      speedLimitMB = 30; // 30 MB/s (~240 Mbps) for 300M+ plans
+    } else if (speedLimitMode === '5' || speedLimitMode === 'wifi-light') {
+      speedLimitMB = 5; // 5 MB/s (~40 Mbps) for 50M plans
+    } else if (speedLimitMode === 'custom') {
+      speedLimitMB = Math.max(0.5, parseFloat(settings.customSpeedMB || 10));
+    } else if (speedLimitMode === 'unlimited') {
+      speedLimitMB = 0; // Uncapped
+    } else {
+      const parsedNum = parseFloat(speedLimitMode);
+      if (!isNaN(parsedNum) && parsedNum > 0) {
+        speedLimitMB = parsedNum;
+      }
+    }
+
+    const isWifiFriendly = settings.wifiFriendly !== false && speedLimitMode !== 'unlimited';
+    settings.speedLimitMB = speedLimitMB;
+    settings.wifiFriendly = isWifiFriendly;
+
+    this.bandwidthLimiter.setLimit(speedLimitMB);
+
+    // Dual Speed Concurrency configuration:
+    // Can download 2 global speed videos (like Bilibili) and 2 local speed videos (like YouTube) together simultaneously
+    this.globalConcurrencyLimit = Math.max(1, parseInt(settings.globalConcurrency || 2, 10));
+    this.localConcurrencyLimit = Math.max(1, parseInt(settings.localConcurrency || 2, 10));
+    this.concurrencyLimit = this.globalConcurrencyLimit + this.localConcurrencyLimit;
+
+    this.globalQueue = [];
+    this.localQueue = [];
+    for (const item of items) {
+      const pool = this.getItemSpeedPool(item);
+      item.speedPool = pool;
+      if (pool === 'local') {
+        this.localQueue.push(item);
+      } else {
+        this.globalQueue.push(item);
+      }
+    }
+
     this.activeQueue = [...items];
     this.totalCount = items.length;
     this.completedCount = 0;
     this.runningCount = 0;
+    this.runningGlobalCount = 0;
+    this.runningLocalCount = 0;
     this.speedMetrics.clear();
     this.emitLog(
       'info',
-      `Queue started: ${items.length} item(s), concurrency ${this.concurrencyLimit}, mode ${String(settings?.bilibiliMode || 'balanced')}`,
-      { totalItems: items.length, concurrency: this.concurrencyLimit, mode: settings?.bilibiliMode || 'balanced' }
+      `Dual-Speed Queue started: ${items.length} item(s) [Global (Bilibili/Overseas): ${this.globalQueue.length} (limit ${this.globalConcurrencyLimit}), Local (YouTube/Domestic): ${this.localQueue.length} (limit ${this.localConcurrencyLimit})]. Downloading up to ${this.concurrencyLimit} streams together per time. QoS=${isWifiFriendly ? 'ON' : 'OFF'}, Speed Limit=${speedLimitMB > 0 ? speedLimitMB + ' MB/s' : 'Uncapped'}`,
+      {
+        totalItems: items.length,
+        globalCount: this.globalQueue.length,
+        localCount: this.localQueue.length,
+        globalLimit: this.globalConcurrencyLimit,
+        localLimit: this.localConcurrencyLimit,
+        totalConcurrency: this.concurrencyLimit,
+        mode: settings?.bilibiliMode || 'fast',
+        isWifiFriendly,
+        speedLimitMB
+      }
     );
 
     // Start global speed broadcast interval
@@ -1421,17 +1868,23 @@ class DownloaderEngine extends EventEmitter {
       this.broadcastGlobalStatus();
     }, 500);
 
-    // Launch worker tasks up to item concurrency limit
-    for (let i = 0; i < this.concurrencyLimit; i++) {
-      this.processNextInQueue(settings);
-    }
+    // Launch dual-channel concurrent workers together (up to 2 global + 2 local simultaneously)
+    this.checkAndFillPools(settings);
   }
 
   async downloadWithYtDlp(item, filePath, settings) {
     const { spawn } = require('child_process');
-    const targetUrl = item.downloadUrl || item.url;
+    let targetUrl = item.downloadUrl || item.url;
+    const targetUrlRawLower = String(targetUrl || '').toLowerCase();
+    if (targetUrl && (targetUrlRawLower.includes('donghuafun') || targetUrlRawLower.includes('/vod/play/') || targetUrlRawLower.includes('/vod/detail/'))) {
+      const resolved = await this.resolveDonghuaStreamUrl(targetUrl);
+      if (resolved) {
+        targetUrl = resolved;
+        item.downloadUrl = resolved;
+      }
+    }
     const targetDir = path.dirname(filePath);
-    const baseFilenameWithoutExt = this.cleanMovieTitle(item);
+    const baseFilenameWithoutExt = this.cleanMovieTitle(item, settings);
 
       const userAgent = this.getModernUserAgent(settings, item);
       const { cookieFile, cookieHeader } = this.prepareCookieConfig(settings, item, targetDir);
@@ -1441,12 +1894,20 @@ class DownloaderEngine extends EventEmitter {
       const targetUrlLower = targetUrl.toLowerCase();
       const isBilibili = targetUrlLower.includes('bilibili') || targetUrlLower.includes('b23.tv') || targetUrlLower.includes('bibili') || item.platform === 'BiliBili' || (item.profile && item.profile.toLowerCase().includes('bili'));
       const isYouTube = targetUrlLower.includes('youtube.com') || targetUrlLower.includes('youtu.be') || item.platform === 'YouTube';
-      const isDashOrHls = isYouTube || isBilibili || /\.(?:mpd|m3u8)(?:[?#]|$)/i.test(targetUrlLower) || /(?:dash|hls)/i.test(String(item.format || item.protocol || ''));
+      const isOdysee = targetUrlLower.includes('odysee.com') || targetUrlLower.includes('lbry.tv') || targetUrlLower.includes('lbry://') || item.platform === 'Odysee' || item.platform === 'LBRY';
+      const isDailymotion = targetUrlLower.includes('dailymotion.com') || item.platform === 'Dailymotion' || (item.profile && item.profile.toLowerCase().includes('dailymotion'));
+      const isGanjing = targetUrlLower.includes('ganjingworld.com') || targetUrlLower.includes('ganjing') || item.platform === 'GanJingWorld';
+      const isDonghua = targetUrlLower.includes('donghuafun') || item.platform === 'DonghuaFun' || item.platform === 'Donghua';
+      const isDashOrHls = isYouTube || isBilibili || isDailymotion || isGanjing || isDonghua || /\.(?:mpd|m3u8)(?:[?#]|$)/i.test(targetUrlLower) || /(?:dash|hls)/i.test(String(item.format || item.protocol || ''));
       const preferredSubtitleLanguages = this.getPreferredSubtitleLanguages(settings, item);
+
+      const effectiveTimeRange = this.getEffectiveTimeRange(item, settings);
+      const sectionSpec = effectiveTimeRange ? this.formatDownloadSection(effectiveTimeRange, item.durationSeconds || this.parseTimeToSeconds(item.duration)) : null;
 
       let capturedFilePath = null;
       const args = [
         '--newline',
+        '--continue',
         '--no-playlist',
         '--no-warnings',
         '--abort-on-unavailable-fragment',
@@ -1456,6 +1917,15 @@ class DownloaderEngine extends EventEmitter {
         '--throttled-rate', '100K',
         ...this.getJsRuntimeArg()
       ];
+
+      if (sectionSpec) {
+        args.push('--download-sections', sectionSpec);
+        this.emitLog('info', `yt-dlp custom time range active: ${sectionSpec} for item ${item.id}`, {
+          itemId: item.id,
+          timeRange: effectiveTimeRange,
+          sectionSpec
+        });
+      }
 
       // Subtitle options: prioritize Chinese or English with temporary staging (guaranteeing 1 subtitle file)
       const shouldDownloadSubs = settings.downloadSubtitles !== false;
@@ -1486,6 +1956,9 @@ class DownloaderEngine extends EventEmitter {
       // Overriding user agent breaks curl_cffi TLS impersonation, triggering immediate anti-bot blocks!
       if (isBilibili) {
         args.push('--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36');
+      } else if (isOdysee) {
+        args.push('--add-header', 'Referer:https://odysee.com/');
+        args.push('--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36');
       } else {
         args.push('--impersonate', 'chrome');
       }
@@ -1508,66 +1981,117 @@ class DownloaderEngine extends EventEmitter {
       let usesExternalDownloader = false;
       if (isBilibili) {
         args.push('--add-header', `Referer: ${this.getBilibiliReferer(item)}`);
-        args.push('--extractor-args', 'bilibili:player_client=tv,app,web');
+        args.push('--extractor-args', 'bilibili:player_client=tv,android,web');
+      } else if (isOdysee) {
+        args.push('--add-header', 'Referer: https://odysee.com/');
+      } else if (isDailymotion) {
+        args.push('--add-header', 'Referer: https://www.dailymotion.com/');
+      } else if (isGanjing) {
+        args.push('--add-header', 'Referer: https://www.ganjingworld.com/');
+      } else if (isDonghua) {
+        args.push('--add-header', 'Referer: https://donghuafun.com/');
       }
 
       const ytDlpExe = this.getBinPath('yt-dlp.exe');
       const ffmpegExe = this.getBinPath('ffmpeg.exe');
       const aria2cExe = this.getBinPath('aria2c.exe');
 
+      const isWifiFriendly = settings.wifiFriendly !== false && settings.speedLimitMode !== 'unlimited';
+      const speedLimitMB = parseFloat(settings.speedLimitMB || 0);
+      const concurrency = Math.max(1, this.concurrencyLimit || 1);
+      const perItemLimitMB = speedLimitMB > 0 ? Math.max(1, Math.floor(speedLimitMB / concurrency)) : 0;
+
       if (isBilibili) {
-        const biliMode = String(settings.bilibiliMode || 'balanced').toLowerCase();
-        // High-reliability native yt-dlp downloader for Bilibili streams (never use aria2c on Bilibili DASH)
+        const biliMode = String(settings.bilibiliMode || 'fast').toLowerCase();
+        // High-speed parallel downloader for Bilibili DASH streams (up to 16 concurrent fragments)
         const fallbackProfiles = {
-          stable: { fragments: '3', buffer: '4M', retries: '25' },
-          balanced: { fragments: '4', buffer: '4M', retries: '25' },
-          fast: { fragments: '6', buffer: '8M', retries: '20' }
+          stable: { fragments: '4', buffer: isWifiFriendly ? '4M' : '8M', retries: '25', conn: '4' },
+          balanced: { fragments: isWifiFriendly ? '6' : '10', buffer: isWifiFriendly ? '4M' : '16M', retries: '25', conn: isWifiFriendly ? '6' : '10' },
+          fast: { fragments: isWifiFriendly ? '8' : '16', buffer: isWifiFriendly ? '8M' : '32M', retries: '20', conn: isWifiFriendly ? '8' : '16' }
         };
-        const fallback = fallbackProfiles[biliMode] || fallbackProfiles.balanced;
-        this.emitLog('info', `yt-dlp Bilibili fallback configured: mode=${biliMode}`, {
+        const fallback = fallbackProfiles[biliMode] || fallbackProfiles.fast;
+        const requestedWorkers = Math.max(1, parseInt(settings.bilibiliThreads || settings.threads || fallback.conn, 10));
+        const numConn = Math.min(16, Math.max(4, requestedWorkers));
+        const numFrags = String(numConn);
+
+        this.emitLog('info', `yt-dlp Bilibili configured: mode=${biliMode} (${numConn} connections/fragments, buffer=${fallback.buffer}, Wi-Fi Friendly=${isWifiFriendly ? 'ON' : 'OFF'}, limit=${perItemLimitMB > 0 ? perItemLimitMB + 'M' : 'Uncapped'})`, {
           itemId: item.id,
           mode: biliMode,
-          fragments: fallback.fragments
+          fragments: numFrags,
+          limitRate: perItemLimitMB
         });
+
+        if (aria2cExe && fs.existsSync(aria2cExe) && !sectionSpec) {
+          args.push('--downloader', 'aria2c');
+          args.push('--downloader-args', `aria2c:-c -x ${numConn} -s ${numConn} -j 4 -k 1M --min-split-size=1M --max-connection-per-server=${numConn} --lowest-speed-limit=20K --timeout=15 --retry-wait=2`);
+          usesExternalDownloader = true;
+        }
         args.push('--downloader', 'dash,m3u8:native');
-        args.push('--concurrent-fragments', fallback.fragments);
+        args.push('--concurrent-fragments', numFrags);
         args.push('--buffer-size', fallback.buffer);
         args.push('--file-access-retries', fallback.retries);
         args.push('--retries', fallback.retries);
         args.push('--fragment-retries', fallback.retries);
+        if (perItemLimitMB > 0) args.push('--limit-rate', `${perItemLimitMB}M`);
       } else if (isYouTube) {
-        // Resilient native yt-dlp downloader with tuned fragments and no forced chunking (prevents throttling & corruption)
-        const numFrags = String(Math.min(8, Math.max(2, parseInt(settings.threads || 6, 10))));
+        // High-speed optimized YouTube downloader: concurrent fragments, 10M chunking and 32M buffer
+        const userThreads = parseInt(settings.threads || 16, 10);
+        const numFrags = String(isWifiFriendly ? Math.min(8, Math.max(4, userThreads)) : Math.min(16, Math.max(4, userThreads)));
+        const bufSize = isWifiFriendly ? '4M' : '32M';
         args.push('--downloader', 'dash,m3u8:native');
         args.push('--concurrent-fragments', numFrags);
-        args.push('--buffer-size', '16M');
+        args.push('--buffer-size', bufSize);
+        args.push('--http-chunk-size', '10M');
         args.push('--file-access-retries', '25');
         args.push('--retries', '25');
         args.push('--fragment-retries', '25');
-        args.push('--extractor-args', 'youtube:player_client=android,web,default');
-        this.emitLog('info', `Using resilient native yt-dlp downloader (${numFrags} fragments, 16M buffer) for YouTube item ${item.id}`, { itemId: item.id });
+        if (perItemLimitMB > 0) args.push('--limit-rate', `${perItemLimitMB}M`);
+        this.emitLog('info', `Using accelerated native yt-dlp downloader (${numFrags} fragments, 10M chunks, ${bufSize} buffer, limit=${perItemLimitMB > 0 ? perItemLimitMB + 'M' : 'Uncapped'}) for YouTube item ${item.id}`, { itemId: item.id });
+      } else if (isOdysee) {
+        // High-reliability native yt-dlp downloader for Odysee / LBRY streams
+        args.push('--buffer-size', isWifiFriendly ? '4M' : '16M');
+        args.push('--file-access-retries', '25');
+        args.push('--retries', '25');
+        args.push('--fragment-retries', '25');
+        if (perItemLimitMB > 0) args.push('--limit-rate', `${perItemLimitMB}M`);
+        this.emitLog('info', `Using resilient native yt-dlp downloader for Odysee item ${item.id}`, { itemId: item.id });
       } else if (isDashOrHls) {
         // High-speed fragments for generic DASH / HLS streams
-        const numFrags = String(Math.min(8, Math.max(2, parseInt(settings.threads || 8, 10))));
+        const userThreads = parseInt(settings.threads || 16, 10);
+        const numFrags = String(isWifiFriendly ? Math.min(8, Math.max(4, userThreads)) : Math.min(16, Math.max(4, userThreads)));
         args.push('--downloader', 'dash,m3u8:native');
         args.push('--concurrent-fragments', numFrags);
-        args.push('--buffer-size', '8M');
+        args.push('--buffer-size', isWifiFriendly ? '4M' : '16M');
         args.push('--file-access-retries', '25');
         args.push('--retries', '25');
         args.push('--fragment-retries', '25');
+        if (perItemLimitMB > 0) args.push('--limit-rate', `${perItemLimitMB}M`);
         this.emitLog('info', `Using accelerated native yt-dlp downloader (${numFrags} fragments) for DASH/HLS item ${item.id}`, { itemId: item.id });
-      } else {
-        // Tuned 8–16 connections and 2M min-split for direct static HTTP files via aria2c
-        const numThreads = Math.min(16, Math.max(4, parseInt(settings.threads || 10, 10)));
-        args.push('--downloader', aria2cExe);
-        args.push('--downloader-args', `aria2c:-c -x ${numThreads} -s ${numThreads} -j 4 -k 2M --min-split-size=2M --max-connection-per-server=${numThreads} --timeout=30 --retry-wait=2`);
-        usesExternalDownloader = true;
-        args.push('--concurrent-fragments', String(numThreads));
-        args.push('--buffer-size', '8M');
+      } else if (sectionSpec) {
+        // Native / ffmpeg downloader for precise section download
+        args.push('--downloader', 'dash,m3u8:native');
+        args.push('--buffer-size', isWifiFriendly ? '4M' : '16M');
         args.push('--file-access-retries', '20');
         args.push('--retries', '20');
         args.push('--fragment-retries', '20');
-        this.emitLog('info', `Using aria2c accelerator (${numThreads} connections, 2M split) for item ${item.id}`, { itemId: item.id });
+        if (perItemLimitMB > 0) args.push('--limit-rate', `${perItemLimitMB}M`);
+        this.emitLog('info', `Using native ffmpeg section downloader for item ${item.id} (${sectionSpec})`, { itemId: item.id });
+      } else {
+        // Tuned connections and min-split for direct static HTTP files via aria2c
+        const numThreads = isWifiFriendly ? Math.min(8, Math.max(4, parseInt(settings.threads || 8, 10))) : Math.min(16, Math.max(4, parseInt(settings.threads || 16, 10)));
+        let aria2Args = `-c -x ${numThreads} -s ${numThreads} -j 4 -k 1M --min-split-size=1M --max-connection-per-server=${numThreads} --timeout=30 --retry-wait=2`;
+        if (perItemLimitMB > 0) aria2Args += ` --max-download-limit=${perItemLimitMB}M`;
+        args.push('--downloader', aria2cExe);
+        args.push('--downloader-args', `aria2c:${aria2Args}`);
+        usesExternalDownloader = true;
+        args.push('--downloader', 'dash,m3u8:native');
+        args.push('--concurrent-fragments', String(numThreads));
+        args.push('--buffer-size', isWifiFriendly ? '4M' : '16M');
+        args.push('--file-access-retries', '20');
+        args.push('--retries', '20');
+        args.push('--fragment-retries', '20');
+        if (perItemLimitMB > 0) args.push('--limit-rate', `${perItemLimitMB}M`);
+        this.emitLog('info', `Using aria2c accelerator (${numThreads} connections, limit=${perItemLimitMB > 0 ? perItemLimitMB + 'M' : 'Uncapped'}) for item ${item.id}`, { itemId: item.id });
       }
 
       // 5. MERGE SEPARATE VIDEO & AUDIO STREAMS (FFMPEG)
@@ -1581,39 +2105,74 @@ class DownloaderEngine extends EventEmitter {
         const mergeFormat = String(settings.fileFormat || 'mp4').toLowerCase() === 'mkv' ? 'mkv' : 'mp4';
         const qualitySetting = String(settings.fileType || settings.videoQuality || '').toLowerCase();
         
+        const codecPref = (settings.videoCodec || 'quality').toLowerCase();
         let formatFilter = '';
-        if (qualitySetting.includes('1080') || qualitySetting === '1080p') {
-          formatFilter = isBilibili 
-            ? 'bv*[height<=1080][vcodec^=avc]+ba/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b/best'
-            : 'bestvideo[height<=1080][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
+        if (isOdysee) {
+          formatFilter = 'bestvideo+bestaudio/best/original';
+        } else if (qualitySetting.includes('1080') || qualitySetting === '1080p') {
+          if (codecPref === 'compatible') {
+            formatFilter = isBilibili 
+              ? 'bv*[height<=1080][vcodec^=avc]+ba/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b/best'
+              : 'bestvideo[height<=1080][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
+          } else if (codecPref === 'efficient') {
+            formatFilter = isBilibili 
+              ? 'bv*[height<=1080][vcodec^=hev]+ba/bv*[height<=1080][vcodec^=av01]+ba/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/best'
+              : 'bestvideo[height<=1080][vcodec^=av01]+bestaudio/bestvideo[height<=1080][vcodec^=vp9]+bestaudio/bestvideo[height<=1080][vcodec^=hev]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
+          } else {
+            // 'quality' (Default): Prioritize highest bitrate at 1080p (AVC high-bitrate first on Bilibili)
+            formatFilter = isBilibili 
+              ? 'bv*[height<=1080][vcodec^=avc]+ba/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b/best'
+              : 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
+          }
         } else if (qualitySetting.includes('720') || qualitySetting === '720p') {
-          formatFilter = isBilibili
-            ? 'bv*[height<=720][vcodec^=avc]+ba/bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/best'
-            : 'bestvideo[height<=720][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best';
+          if (codecPref === 'compatible') {
+            formatFilter = isBilibili
+              ? 'bv*[height<=720][vcodec^=avc]+ba/bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/best'
+              : 'bestvideo[height<=720][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best';
+          } else if (codecPref === 'efficient') {
+            formatFilter = isBilibili
+              ? 'bv*[height<=720][vcodec^=hev]+ba/bv*[height<=720][vcodec^=av01]+ba/bv*[height<=720]+ba/b[height<=720]/best'
+              : 'bestvideo[height<=720][vcodec^=av01]+bestaudio/bestvideo[height<=720][vcodec^=vp9]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]/best';
+          } else {
+            formatFilter = isBilibili
+              ? 'bv*[height<=720][vcodec^=avc]+ba/bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/best'
+              : 'bestvideo[height<=720]+bestaudio/best[height<=720]/best';
+          }
         } else if (qualitySetting.includes('480') || qualitySetting === '480p') {
           formatFilter = isBilibili
-            ? 'bv*[height<=480][vcodec^=avc]+ba/bv*[height<=480]+ba/b[height<=480]/bv*+ba/b/best'
-            : 'bestvideo[height<=480][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/best';
+            ? 'bv*[height<=480]+ba/b[height<=480]/bv*+ba/best'
+            : 'bestvideo[height<=480]+bestaudio/best[height<=480]/best';
         } else if (qualitySetting.includes('1440') || qualitySetting === '1440p' || qualitySetting.includes('2k')) {
           formatFilter = isBilibili
-            ? 'bv*[height<=1440][vcodec^=avc]+ba/bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/b/best'
-            : 'bestvideo[height<=1440][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best';
+            ? 'bv*[height<=1440]+ba/bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/best'
+            : 'bestvideo[height<=1440]+bestaudio/best';
         } else if (qualitySetting.includes('2160') || qualitySetting.includes('4k')) {
           formatFilter = isBilibili
-            ? 'bv*[height<=2160][vcodec^=avc]+ba/bv*[height<=2160]+ba/b[height<=2160]/bv*+ba/b/best'
-            : 'bestvideo[height<=2160][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best';
+            ? 'bv*[height<=2160]+ba/bv*[height<=2160]+ba/b[height<=2160]/bv*+ba/best'
+            : 'bestvideo[height<=2160]+bestaudio/best';
         } else {
-          // Highest Available (Original / 4K / 1080p / 8K)
-          formatFilter = isBilibili
-            ? 'bv*[vcodec^=avc]+ba/bv*+ba/b/best'
-            : 'bestvideo[vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/b/best';
+          // Highest Available (Original / 4K / 1080p+ / 8K)
+          if (codecPref === 'compatible') {
+            formatFilter = isBilibili
+              ? 'bv*[vcodec^=avc]+ba/bv*+ba/b/best'
+              : 'bestvideo[vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/b/best';
+          } else if (codecPref === 'efficient') {
+            formatFilter = isBilibili
+              ? 'bv*[vcodec^=hev]+ba/bv*[vcodec^=av01]+ba/bv*+ba/b/best'
+              : 'bestvideo[vcodec^=av01]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo+bestaudio/b/best';
+          } else {
+            // 'quality' (Default): Highest bitrate format available
+            formatFilter = isBilibili
+              ? 'bv*+ba/b/best'
+              : 'bestvideo+bestaudio/best';
+          }
         }
 
         args.push('-f', formatFilter);
         args.push('--merge-output-format', mergeFormat);
         const muxingPostArgs = mergeFormat === 'mp4'
-          ? 'Merger:-movflags +faststart -max_muxing_queue_size 9999 -avoid_negative_ts make_zero -fflags +genpts'
-          : 'Merger:-max_muxing_queue_size 9999 -avoid_negative_ts make_zero -fflags +genpts';
+          ? 'Merger:-movflags +faststart -max_muxing_queue_size 9999'
+          : 'Merger:-max_muxing_queue_size 9999';
         args.push('--postprocessor-args', muxingPostArgs);
       }
 
@@ -1677,7 +2236,7 @@ class DownloaderEngine extends EventEmitter {
 
           const fragMatch = line.match(/\(frag\s+(\d+)\/(\d+)\)/i);
           const ytMatch = line.match(/\[download\]\s+([\d\.]+)%\s+of\s+~?([\d\.]+)([KMG]i?B)\s+(?:at\s+([\d\.]+)([KMG]i?B\/s))?/i);
-          const ariaMatch = line.match(/\[#\w+\s+([\d\.]+)[KMG]i?B\/([\d\.]+)([KMG]i?B)\(([\d\.]+)%\).*?DL:([\d\.]+)([KMG]i?B)/i);
+          const ariaMatch = line.match(/\[#\w+\s+([\d\.]+)([KMG]i?B)\/([\d\.]+)([KMG]i?B)\(([\d\.]+)%\).*?DL:([\d\.]+)([KMG]i?B)/i);
 
           if (fragMatch || ytMatch || ariaMatch) {
             let percentage, downloadedMB, val, unit;
@@ -1713,10 +2272,14 @@ class DownloaderEngine extends EventEmitter {
               val = ytMatch[4];
               unit = ytMatch[5] ? ytMatch[5].toUpperCase() : null;
             } else {
-              percentage = Math.min(99, Math.round(parseFloat(ariaMatch[4])));
-              downloadedMB = ariaMatch[1];
-              val = ariaMatch[5];
-              unit = ariaMatch[6] ? ariaMatch[6].toUpperCase() + '/S' : null;
+              percentage = Math.min(99, Math.round(parseFloat(ariaMatch[5])));
+              const rawAria = parseFloat(ariaMatch[1]);
+              const ariaUnit = (ariaMatch[2] || '').toUpperCase();
+              if (ariaUnit.includes('G')) downloadedMB = (rawAria * 1024).toFixed(2);
+              else if (ariaUnit.includes('K')) downloadedMB = (rawAria / 1024).toFixed(2);
+              else downloadedMB = rawAria.toFixed(2);
+              val = ariaMatch[6];
+              unit = ariaMatch[7] ? ariaMatch[7].toUpperCase() + '/S' : null;
             }
 
             if (item.status !== 'downloading' && percentage === 100) return;
@@ -1766,7 +2329,7 @@ class DownloaderEngine extends EventEmitter {
             }
           }
           isDone = true;
-          this.runningCount--;
+          this.decrementRunning(item);
           const errMsg = `Error: ${err.message || 'yt-dlp spawn failed'}`;
           this.emitLog('error', `yt-dlp spawn failed for item ${item.id}`, {
             itemId: item.id,
@@ -1779,7 +2342,8 @@ class DownloaderEngine extends EventEmitter {
             percentage: 0,
             downloadedMB: '0.00'
           });
-          this.processNextInQueue(settings);
+          this.checkAndFillPools(settings);
+          this.checkQueueCompleted();
           resolve();
         }
       });
@@ -1791,21 +2355,12 @@ class DownloaderEngine extends EventEmitter {
           if (tempSubDir && fs.existsSync(tempSubDir)) {
             try { fs.rmSync(tempSubDir, { recursive: true, force: true }); } catch (e) {}
           }
-          try {
-            if (fs.existsSync(targetDir)) {
-              const files = fs.readdirSync(targetDir);
-              files.forEach(f => {
-                if (f.startsWith(baseFilenameWithoutExt) && this.isIntermediateDownloadFile(f)) {
-                  try { fs.unlinkSync(path.join(targetDir, f)); } catch (e) {}
-                }
-              });
-            }
-          } catch (e) {}
           if (!isDone) {
             isDone = true;
-            this.runningCount--;
-            this.emit('item-progress', { id: item.id, status: 'Cancelled', percentage: 0, downloadedMB: '0.00' });
-            this.emitLog('warn', `yt-dlp cancelled for item ${item.id}`, { itemId: item.id, exitCode: code });
+            this.decrementRunning(item);
+            this.emit('item-progress', { id: item.id, status: 'Cancelled (Paused)' });
+            this.emitLog('warn', `yt-dlp cancelled for item ${item.id} (partial download preserved for resume)`, { itemId: item.id, exitCode: code });
+            this.checkQueueCompleted();
             resolve();
           }
           return;
@@ -1928,9 +2483,9 @@ class DownloaderEngine extends EventEmitter {
           isFileValid = await this.validateMediaFile(actualFilePath);
         }
 
-        // If code !== 0 or file is corrupt/incomplete, DO NOT finalize as completed!
-        if (actualFilePath && (!isFileValid || code !== 0)) {
-          this.emitLog('warn', `yt-dlp produced an invalid or incomplete video file (${path.basename(actualFilePath)}, exitCode=${code}, valid=${isFileValid}). Removing broken file to protect user playback.`, {
+        // If actual file was produced but is corrupted or incomplete, remove it
+        if (actualFilePath && !isFileValid) {
+          this.emitLog('warn', `yt-dlp produced an invalid or incomplete video file (${path.basename(actualFilePath)}, exitCode=${code}, valid=false). Removing broken file to protect user playback.`, {
             itemId: item.id,
             exitCode: code,
             filePath: actualFilePath
@@ -1939,7 +2494,7 @@ class DownloaderEngine extends EventEmitter {
           actualFilePath = null;
         }
 
-        if (actualFilePath && isFileValid && code === 0) {
+        if (actualFilePath && isFileValid) {
           if (!isDone) {
             isDone = true;
             this.emitLog('info', `yt-dlp completed and verified for item ${item.id}`, {
@@ -1951,6 +2506,9 @@ class DownloaderEngine extends EventEmitter {
             if (shouldDownloadSubs) {
               const subtitlePath = this.normalizeYtDlpSubtitleOutput(targetDir, baseFilenameWithoutExt, preferredSubtitleLanguages, settings, tempSubDir);
               if (subtitlePath) {
+                if (effectiveTimeRange && sectionSpec) {
+                  this.trimSubtitleToTimeRange(subtitlePath, effectiveTimeRange, item.durationSeconds || this.parseTimeToSeconds(item.duration));
+                }
                 this.emitLog('info', `Saved 1 primary subtitle: ${path.basename(subtitlePath)}`, {
                   itemId: item.id,
                   filePath: subtitlePath
@@ -1974,6 +2532,9 @@ class DownloaderEngine extends EventEmitter {
                   'Referer': this.getBilibiliReferer(item)
                 }, cid, actualFilePath, bvidMatch, aidMatch, pageNum, settings);
                 if (subFiles && subFiles.length > 0) {
+                  if (effectiveTimeRange && sectionSpec) {
+                    this.trimSubtitleToTimeRange(subFiles[0], effectiveTimeRange, item.durationSeconds || this.parseTimeToSeconds(item.duration));
+                  }
                   item.subtitleFiles = subFiles;
                 }
               } catch (e) {}
@@ -2003,7 +2564,7 @@ class DownloaderEngine extends EventEmitter {
           }
           if (!isDone) {
             isDone = true;
-            this.runningCount--;
+            this.decrementRunning(item);
             this.emitLog('error', `yt-dlp finished without output for item ${item.id}`, {
               itemId: item.id,
               exitCode: code
@@ -2044,12 +2605,106 @@ class DownloaderEngine extends EventEmitter {
               percentage: 0,
               downloadedMB: '0.00'
             });
-            this.processNextInQueue(settings);
+            this.checkAndFillPools(settings);
+            this.checkQueueCompleted();
             resolve();
           }
         }
       });
     });
+  }
+
+  async probeBilibiliMirrors(urls, headers, controller) {
+    if (!Array.isArray(urls) || urls.length === 0) return urls || [];
+    const rawCandidates = [...urls].filter(Boolean);
+    if (rawCandidates.length === 0) return [];
+
+    // Trusted, high-bandwidth UPOS hosts that DO NOT throttle sustained video downloads
+    const FAST_UPOS_HOSTS = [
+      'upos-sz-mirroraliov.bilivideo.com', // Alibaba Cloud Global / Overseas (Fastest & Most reliable worldwide)
+      'upos-sz-mirrorali.bilivideo.com',   // Alibaba Cloud Mainland
+      'upos-sz-mirrorcoso1.bilivideo.com', // Tencent Cloud Mirror 1 (High capacity, excellent speeds)
+      'upos-sz-mirrorcosov.bilivideo.com', // Tencent Cloud Overseas
+      'upos-sz-mirrorhw.bilivideo.com',    // Huawei Cloud
+      'upos-sz-mirrorcos.bilivideo.com'    // Tencent Cloud Standard
+    ];
+
+    const candidates = [];
+    const seenHosts = new Set();
+
+    // 1. Generate URLs for fast UPOS hosts using path/query from primary URL
+    try {
+      const sample = new URL(rawCandidates[0]);
+      for (const fastHost of FAST_UPOS_HOSTS) {
+        if (!seenHosts.has(fastHost)) {
+          seenHosts.add(fastHost);
+          const alt = new URL(sample.toString());
+          alt.hostname = fastHost;
+          candidates.push(alt.toString());
+        }
+      }
+    } catch (e) {}
+
+    // 2. Include raw candidate URLs if they are NOT known throttling hosts (akamaized / mcdn)
+    for (const rawUrl of rawCandidates) {
+      try {
+        const u = new URL(rawUrl);
+        const host = u.hostname.toLowerCase();
+        // Skip akamaized (throttles to 0.01MB/s after 3min) and mcdn (PCDN aggressive throttling)
+        if (host.includes('akamaized.net') || host.includes('mcdn.bilivideo.cn')) {
+          continue;
+        }
+        if (!seenHosts.has(host)) {
+          seenHosts.add(host);
+          candidates.push(rawUrl);
+        }
+      } catch (e) {}
+    }
+
+    if (candidates.length === 0) {
+      candidates.push(...rawCandidates);
+    }
+
+    // 3. Probe candidates with 2KB range test (3500ms timeout)
+    const probePromises = candidates.map(async (url) => {
+      const start = Date.now();
+      try {
+        const res = await axios({
+          method: 'GET',
+          url,
+          headers: { ...headers, Range: 'bytes=0-2048' },
+          timeout: 3500,
+          responseType: 'arraybuffer',
+          signal: controller?.signal,
+          httpAgent: HTTP_AGENT,
+          httpsAgent: HTTPS_AGENT,
+          validateStatus: (status) => status === 200 || status === 206
+        });
+        const latency = Date.now() - start;
+        const valid = (res.status === 200 || res.status === 206) && res.data && res.data.byteLength > 0;
+        return { url, latency, ok: valid };
+      } catch (e) {
+        return { url, latency: 99999, ok: false };
+      }
+    });
+
+    try {
+      const results = await Promise.all(probePromises);
+      const healthy = results.filter(r => r.ok).sort((a, b) => a.latency - b.latency);
+      if (healthy.length > 0) {
+        // Return ONLY verified healthy URLs, fastest first!
+        return healthy.map(h => h.url);
+      }
+    } catch (e) {}
+
+    // Safe fallback: prioritize aliov, then raw candidates
+    try {
+      const fallbackUrl = new URL(rawCandidates[0]);
+      fallbackUrl.hostname = 'upos-sz-mirroraliov.bilivideo.com';
+      return [fallbackUrl.toString(), ...rawCandidates];
+    } catch(e) {
+      return rawCandidates;
+    }
   }
 
   async downloadBilibiliDASH(item, filePath, settings, options = {}) {
@@ -2079,29 +2734,44 @@ class DownloaderEngine extends EventEmitter {
     const controller = new AbortController();
     this.activeControllers.set(item.id, controller);
 
+    const videoTemp = filePath + '.video.m4s';
+    const audioTemp = filePath + '.audio.m4s';
+
     try {
-      logPhase('info', `Starting Bilibili DASH download: ${path.basename(filePath)}`);
-      this.emit('item-progress', { id: item.id, status: 'Fetching DASH manifest...', percentage: 1, downloadedMB: '0.00', speedMbps: '0.00' });
+      const hasExistingResume = fs.existsSync(videoTemp) || fs.existsSync(audioTemp) || fs.existsSync(videoTemp + '.aria2');
+      logPhase('info', `${hasExistingResume ? 'Resuming' : 'Starting'} Bilibili DASH download: ${path.basename(filePath)}`);
+      this.emit('item-progress', {
+        id: item.id,
+        status: hasExistingResume ? 'Resuming DASH download...' : 'Fetching DASH manifest...',
+        percentage: item.percentage && item.percentage > 0 ? item.percentage : 1,
+        downloadedMB: item.downloadedMB && item.downloadedMB !== '0.00' ? item.downloadedMB : '0.00',
+        speedMbps: '0.00'
+      });
 
       let bvidMatch = targetUrl.match(/BV[0-9a-zA-Z]+/i);
       let aidMatch = targetUrl.match(/av([0-9]+)/i);
       const pageMatch = targetUrl.match(/[?&]p=([0-9]+)/i);
-      const pageNum = pageMatch ? parseInt(pageMatch[1], 10) : 1;
+      const pageNum = pageMatch ? parseInt(pageMatch[1], 10) : (item && item.page ? item.page : 1);
 
       if (!bvidMatch && !aidMatch) throw new Error("Invalid Bilibili URL");
 
-      const pagelistUrl = bvidMatch 
-        ? `https://api.bilibili.com/x/player/pagelist?bvid=${bvidMatch[0]}`
-        : `https://api.bilibili.com/x/player/pagelist?aid=${aidMatch[1]}`;
+      let cid = item && item.cid ? item.cid : null;
+      if (!cid) {
+        const pagelistUrl = bvidMatch 
+          ? `https://api.bilibili.com/x/player/pagelist?bvid=${bvidMatch[0]}`
+          : `https://api.bilibili.com/x/player/pagelist?aid=${aidMatch[1]}`;
 
-      const pagelistStart = Date.now();
-      const listRes = await axios.get(pagelistUrl, { headers, timeout: 15000 });
-      if (!listRes.data || listRes.data.code !== 0 || !listRes.data.data) {
-        throw new Error("Failed to get pagelist: " + (listRes.data ? listRes.data.message : ''));
+        const pagelistStart = Date.now();
+        const listRes = await axios.get(pagelistUrl, { headers, timeout: 15000 });
+        if (!listRes.data || listRes.data.code !== 0 || !listRes.data.data) {
+          throw new Error("Failed to get pagelist: " + (listRes.data ? listRes.data.message : ''));
+        }
+        const pageEntry = listRes.data.data.find(e => e.page === pageNum) || listRes.data.data[0];
+        cid = pageEntry ? pageEntry.cid : null;
+        logPhase('info', `Pagelist ready in ${Date.now() - pagelistStart}ms (cid=${cid}, page=${pageNum})`);
+      } else {
+        logPhase('info', `Using pre-resolved CID (cid=${cid}, page=${pageNum})`);
       }
-      const pageEntry = listRes.data.data.find(e => e.page === pageNum) || listRes.data.data[0];
-      const cid = pageEntry.cid;
-      logPhase('info', `Pagelist ready in ${Date.now() - pagelistStart}ms (cid=${cid}, page=${pageNum})`);
 
       let cachedDash = null;
       let dashFetchPromise = null;
@@ -2141,12 +2811,71 @@ class DownloaderEngine extends EventEmitter {
 
       const getBestVideoTrack = (dash) => {
         if (!dash || !Array.isArray(dash.video) || dash.video.length === 0) return null;
-        const sorted = [...dash.video].sort((a, b) => (b.id || 0) - (a.id || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
-        // Prioritize AVC / H.264 (avc1) first: 100% universal compatibility for playback, video editors, and YouTube upload
-        return sorted.find(v => v.codecs && v.codecs.startsWith('avc'))
-            || sorted.find(v => v.codecs && (v.codecs.startsWith('hvc') || v.codecs.startsWith('hev')))
-            || sorted.find(v => v.codecs && v.codecs.startsWith('av01'))
-            || sorted[0];
+        
+        const qualitySetting = String(settings.fileType || settings.videoQuality || '').toLowerCase();
+        let maxHeight = 99999;
+        if (qualitySetting.includes('480') || qualitySetting === '480p') maxHeight = 480;
+        else if (qualitySetting.includes('720') || qualitySetting === '720p') maxHeight = 720;
+        else if (qualitySetting.includes('1080') || qualitySetting === '1080p') maxHeight = 1080;
+        else if (qualitySetting.includes('1440') || qualitySetting === '1440p' || qualitySetting.includes('2k')) maxHeight = 1440;
+        else if (qualitySetting.includes('2160') || qualitySetting === '4k') maxHeight = 2160;
+
+        // Filter candidate videos that fit within maxHeight (e.g. 1440p / 2K, 4K, 1080p)
+        const matchingVideos = dash.video.filter(v => (v.height || 0) <= maxHeight);
+        const candidateVideos = matchingVideos.length > 0 ? matchingVideos : dash.video;
+
+        // 1. Group by highest resolution / quality tier (e.g. 127:8K, 120:4K, 116:1080p60, 112:1080p+, 80:1080p, 64:720p)
+        const sorted = [...candidateVideos].sort((a, b) => (b.id || 0) - (a.id || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
+        const topId = sorted[0].id;
+        const topTracks = sorted.filter(v => v.id === topId);
+
+        const codecPref = (settings.videoCodec || 'quality').toLowerCase();
+
+        if (codecPref === 'compatible') {
+          // Explicitly prefer AVC / H.264 for maximum compatibility
+          return topTracks.find(v => v.codecs && v.codecs.startsWith('avc'))
+              || topTracks.find(v => v.codecs && (v.codecs.startsWith('hvc') || v.codecs.startsWith('hev')))
+              || topTracks.find(v => v.codecs && v.codecs.startsWith('av01'))
+              || topTracks[0];
+        } else if (codecPref === 'efficient') {
+          // Explicitly prefer HEVC/AV1 for smaller file size, picking highest bitrate among them
+          const efficientTracks = topTracks.filter(v => v.codecs && (v.codecs.startsWith('hvc') || v.codecs.startsWith('hev') || v.codecs.startsWith('av01')));
+          if (efficientTracks.length > 0) {
+            return efficientTracks.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))[0];
+          }
+          return topTracks[0];
+        } else {
+          // 'quality' (Smart Bitrate & Quality Selection - Default):
+          // Compare actual bitrates across AVC, HEVC, and AV1 variants.
+          // Never blindly do "AV1 first -> therefore best" when Bilibili heavily starves AV1 bitrate!
+          const avcTrack = topTracks.find(v => v.codecs && v.codecs.startsWith('avc'));
+          const hevcTrack = topTracks.find(v => v.codecs && (v.codecs.startsWith('hvc') || v.codecs.startsWith('hev')));
+          const av1Track = topTracks.find(v => v.codecs && v.codecs.startsWith('av01'));
+
+          const avcBw = avcTrack ? (avcTrack.bandwidth || 0) : 0;
+          const hevcBw = hevcTrack ? (hevcTrack.bandwidth || 0) : 0;
+          const av1Bw = av1Track ? (av1Track.bandwidth || 0) : 0;
+
+          // Perceptual quality weighting: HEVC delivers ~50% better compression than AVC, AV1 ~60%.
+          // When bitrates are comparable, HEVC/AV1 delivers equal or superior detail at half the file size.
+          const avcScore = avcBw * 1.0;
+          const hevcScore = hevcBw * 2.0;
+          const av1Score = av1Bw * 2.5;
+
+          const candidates = [];
+          if (avcTrack) candidates.push({ track: avcTrack, score: avcScore, bw: avcBw, name: 'AVC' });
+          if (hevcTrack) candidates.push({ track: hevcTrack, score: hevcScore, bw: hevcBw, name: 'HEVC' });
+          if (av1Track) candidates.push({ track: av1Track, score: av1Score, bw: av1Bw, name: 'AV1' });
+
+          if (candidates.length > 0) {
+            candidates.sort((a, b) => b.score - a.score || b.bw - a.bw);
+            const winner = candidates[0];
+            logPhase('info', `Smart Quality Selection: Chose ${winner.name} (${Math.round(winner.bw / 1000)} kbps) for top visual fidelity [Score: ${Math.round(winner.score)}]`);
+            return winner.track;
+          }
+
+          return topTracks[0];
+        }
       };
 
       const getBestAudioTrack = (dash) => {
@@ -2164,60 +2893,208 @@ class DownloaderEngine extends EventEmitter {
       const lockedVideoCodecs = videoInfo ? videoInfo.codecs : null;
       const lockedAudioId = audioInfo ? audioInfo.id : null;
 
-      const videoTemp = filePath + '.video.m4s';
-      const audioTemp = filePath + '.audio.m4s';
-
       let totalBytes = 0;
       let downloadedBytes = 0;
 
-      const downloadStream = async (type, getUrlFn, tempPath) => {
+      const downloadStream = async (type, getUrlsFn, tempPath) => {
         const streamStartedAt = Date.now();
-        let currentUrl = await getUrlFn(false, 0);
+        let streamUrls = await getUrlsFn(false);
+        if (!Array.isArray(streamUrls) || streamUrls.length === 0) {
+          throw new Error(`Failed to resolve stream URLs for ${type}`);
+        }
         let streamTotalBytes = 0;
-        logPhase('info', `${type} stream URL resolved`);
+        logPhase('info', `${type} stream URLs resolved (${streamUrls.length} mirror(s): ${streamUrls.map(u => { try { return new URL(u).hostname; } catch(e){ return 'mirror'; } }).join(', ')})`);
 
-        try {
-          const headRes = await axios({
-            method: 'HEAD',
-            url: currentUrl,
-            timeout: 15000,
-            headers,
-            signal: controller.signal,
-            httpAgent: HTTP_AGENT,
-            httpsAgent: HTTPS_AGENT
-          });
-          streamTotalBytes = parseInt(headRes.headers['content-length'], 10) || 0;
-        } catch (e) {
+        for (const probeCandidate of streamUrls) {
           try {
-            const probeRes = await axios({
-              method: 'GET',
-              url: currentUrl,
-              timeout: 15000,
-              headers: { ...headers, Range: 'bytes=0-0' },
-              responseType: 'stream',
+            const headRes = await axios({
+              method: 'HEAD',
+              url: probeCandidate,
+              timeout: 10000,
+              headers,
               signal: controller.signal,
-              validateStatus: (status) => status === 200 || status === 206,
               httpAgent: HTTP_AGENT,
               httpsAgent: HTTPS_AGENT
             });
-            const rangeHeader = probeRes.headers['content-range'];
-            if (rangeHeader) {
-              const match = rangeHeader.match(/\/(\d+)$/);
-              if (match) streamTotalBytes = parseInt(match[1], 10) || 0;
-            }
-            if (!streamTotalBytes) {
-              streamTotalBytes = parseInt(probeRes.headers['content-length'], 10) || 0;
-            }
-            if (probeRes.data && typeof probeRes.data.destroy === 'function') {
-              probeRes.data.destroy();
-            }
-          } catch (probeErr) {
-            throw new Error(`Failed to get stream info for ${type}`);
+            streamTotalBytes = parseInt(headRes.headers['content-length'], 10) || 0;
+            if (streamTotalBytes > 0) break;
+          } catch (e) {
+            try {
+              const probeRes = await axios({
+                method: 'GET',
+                url: probeCandidate,
+                timeout: 10000,
+                headers: { ...headers, Range: 'bytes=0-0' },
+                responseType: 'stream',
+                signal: controller.signal,
+                validateStatus: (status) => status === 200 || status === 206,
+                httpAgent: HTTP_AGENT,
+                httpsAgent: HTTPS_AGENT
+              });
+              const rangeHeader = probeRes.headers['content-range'];
+              if (rangeHeader) {
+                const match = rangeHeader.match(/\/(\d+)$/);
+                if (match) streamTotalBytes = parseInt(match[1], 10) || 0;
+              }
+              if (!streamTotalBytes) {
+                streamTotalBytes = parseInt(probeRes.headers['content-length'], 10) || 0;
+              }
+              if (probeRes.data && typeof probeRes.data.destroy === 'function') {
+                probeRes.data.destroy();
+              }
+              if (streamTotalBytes > 0) break;
+            } catch (probeErr) {}
           }
+        }
+
+        if (!streamTotalBytes) {
+          throw new Error(`Failed to get stream info for ${type}`);
         }
         
         totalBytes += streamTotalBytes;
         logPhase('info', `${type} stream size detected: ${(streamTotalBytes / (1024 * 1024)).toFixed(2)} MB`);
+
+        // Adaptive high-performance aria2c engine integration
+        const aria2cExe = this.getBinPath('aria2c.exe');
+        if (aria2cExe && fs.existsSync(aria2cExe) && Array.isArray(streamUrls) && streamUrls.length > 0) {
+          let ariaSuccess = false;
+          const maxAriaAttempts = 2;
+
+          for (let attempt = 1; attempt <= maxAriaAttempts; attempt++) {
+            if (this.isCancelled) break;
+            try {
+              if (attempt > 1) {
+                logPhase('info', `Refreshing Bilibili stream URLs and tokens for aria2c retry ${attempt}/${maxAriaAttempts}`);
+                try {
+                  const fresh = await getUrlsFn(true);
+                  if (Array.isArray(fresh) && fresh.length > 0) streamUrls = fresh;
+                } catch (e) {}
+              }
+
+              const requestedThreads = parseInt(settings.threads || settings.bilibiliThreads || 4, 10);
+              const connections = type === 'audio'
+                ? Math.min(2, Math.max(1, requestedThreads))
+                : Math.min(6, Math.max(2, requestedThreads));
+
+              logPhase('info', `Accelerating ${type} stream with aria2c (${connections} connections, attempt ${attempt}/${maxAriaAttempts})`);
+              const ariaFilename = path.basename(tempPath);
+              const ariaDir = path.dirname(tempPath);
+              const targetMirrorUrls = streamUrls.filter(Boolean);
+              const ariaArgs = [
+                '-x', String(connections),
+                '-s', String(connections),
+                '-j', '4',
+                '-k', '1M',
+                '--min-split-size=1M',
+                '--max-connection-per-server=' + String(connections),
+                '--file-allocation=none',
+                '--continue=true',
+                '--max-tries=15',
+                '--retry-wait=2',
+                '--summary-interval=1',
+                '--lowest-speed-limit=20K',
+                '--timeout=15',
+                '--connect-timeout=10',
+                '--header', `User-Agent: ${userAgent}`,
+                '--header', `Referer: ${this.getBilibiliReferer(item)}`,
+                '--header', 'Origin: https://www.bilibili.com',
+                '-d', ariaDir,
+                '-o', ariaFilename,
+                '--auto-file-renaming=false',
+                '--allow-overwrite=true'
+              ];
+              if (cookieHeader) {
+                ariaArgs.push('--header', `Cookie: ${cookieHeader}`);
+              }
+              if (settings.speedLimitMB && settings.speedLimitMB > 0) {
+                ariaArgs.push(`--max-download-limit=${settings.speedLimitMB}M`);
+              }
+              // Prioritize the top verified mirror URL; if a backup shares the same host, add it
+              if (targetMirrorUrls.length > 0) {
+                ariaArgs.push(targetMirrorUrls[0]);
+                if (targetMirrorUrls.length > 1 && targetMirrorUrls[1]) {
+                  try {
+                    const host0 = new URL(targetMirrorUrls[0]).hostname;
+                    const host1 = new URL(targetMirrorUrls[1]).hostname;
+                    if (host0 === host1) {
+                      ariaArgs.push(targetMirrorUrls[1]);
+                    }
+                  } catch (e) {}
+                }
+              }
+
+              const { spawn } = require('child_process');
+              const ariaProc = spawn(aria2cExe, ariaArgs);
+              const abortHandler = () => {
+                try { ariaProc.kill('SIGINT'); } catch(e){}
+              };
+              if (controller && controller.signal) {
+                controller.signal.addEventListener('abort', abortHandler);
+              }
+
+              let prevDownloaded = 0;
+              ariaProc.stdout.on('data', d => {
+                const str = d.toString();
+                let curBytes = 0;
+                const detailedMatch = str.match(/\[#\w+\s+([\d\.]+)([KMG]i?B)\/([\d\.]+)([KMG]i?B)/i);
+                if (detailedMatch) {
+                  const num = parseFloat(detailedMatch[1]);
+                  const u = detailedMatch[2].toUpperCase();
+                  if (u.includes('G')) curBytes = Math.round(num * 1024 * 1024 * 1024);
+                  else if (u.includes('M')) curBytes = Math.round(num * 1024 * 1024);
+                  else if (u.includes('K')) curBytes = Math.round(num * 1024);
+                  else curBytes = Math.round(num);
+                } else {
+                  const match = str.match(/\((\d+)%\)/);
+                  if (match) {
+                    const pct = parseInt(match[1], 10);
+                    curBytes = Math.round((pct / 100) * streamTotalBytes);
+                  }
+                }
+                if (curBytes > prevDownloaded) {
+                  const delta = curBytes - prevDownloaded;
+                  prevDownloaded = curBytes;
+                  downloadedBytes += delta;
+                }
+              });
+
+              await new Promise((resAria, rejAria) => {
+                ariaProc.on('close', code => {
+                  if (controller && controller.signal) {
+                    controller.signal.removeEventListener('abort', abortHandler);
+                  }
+                  if (this.isCancelled) {
+                    logPhase('info', `aria2c stopped by user; preserving partial download and control file for resume`);
+                    resAria();
+                    return;
+                  }
+                  const minExpected = Math.floor(streamTotalBytes * 0.95);
+                  const ariaControl = tempPath + '.aria2';
+                  const ariaStillPresent = fs.existsSync(ariaControl);
+                  if (code === 0 && fs.existsSync(tempPath) && !ariaStillPresent && fs.statSync(tempPath).size >= minExpected) {
+                    downloadedBytes += Math.max(0, streamTotalBytes - prevDownloaded);
+                    logPhase('info', `aria2c completed ${type} stream successfully`);
+                    ariaSuccess = true;
+                    resAria();
+                  } else {
+                    rejAria(new Error(`aria2c exited with code ${code}${ariaStillPresent ? ' (aria2 control file still exists, stream incomplete)' : ''}`));
+                  }
+                });
+                ariaProc.on('error', rejAria);
+              });
+
+              if (this.isCancelled || ariaSuccess) break;
+            } catch (ariaErr) {
+              if (this.isCancelled) return;
+              logPhase('warn', `aria2c attempt ${attempt} encountered an issue: ${ariaErr.message}`);
+              if (attempt >= maxAriaAttempts) {
+                logPhase('warn', `aria2c retries exhausted for ${type}, falling back to native chunk pipeline (preserving existing downloaded data)`);
+              }
+            }
+          }
+
+          if (ariaSuccess || this.isCancelled) return;
+        }
 
         let chunks = [];
         const stateFile = tempPath + '.state.json';
@@ -2238,8 +3115,12 @@ class DownloaderEngine extends EventEmitter {
             downloadedBytes += preDownloaded;
             logPhase('info', `Resuming ${type} stream from ${preDownloaded} bytes`);
           } else {
-            sharedFd = fs.openSync(tempPath, 'w+');
-            if (streamTotalBytes > 0) fs.ftruncateSync(sharedFd, streamTotalBytes);
+            if (fs.existsSync(tempPath) && fs.statSync(tempPath).size > 0 && !fs.existsSync(tempPath + '.aria2')) {
+              sharedFd = fs.openSync(tempPath, 'r+');
+            } else {
+              sharedFd = fs.openSync(tempPath, 'w+');
+              if (streamTotalBytes > 0) fs.ftruncateSync(sharedFd, streamTotalBytes);
+            }
           }
         } catch (e) {
           if (sharedFd !== null) fs.closeSync(sharedFd);
@@ -2248,7 +3129,7 @@ class DownloaderEngine extends EventEmitter {
 
         const tuning = this.getBilibiliDashTuning(streamTotalBytes, type, settings);
         if (chunks.length === 0) {
-          logPhase('info', `${type} stream tuned for ${tuning.workerCount} worker(s), chunk ${(tuning.chunkBytes / (1024 * 1024)).toFixed(2)} MB`);
+          logPhase('info', `${type} stream tuned for ${tuning.workerCount} worker(s), chunk ${(tuning.chunkBytes / (1024 * 1024)).toFixed(2)} MB across ${streamUrls.length} mirror(s)`);
           const chunkSize = tuning.chunkBytes;
           for (let i = 0, startByte = 0; startByte < streamTotalBytes; i++, startByte += chunkSize) {
             if (startByte >= streamTotalBytes) break;
@@ -2256,6 +3137,23 @@ class DownloaderEngine extends EventEmitter {
             chunks.push({ startByte, endByte, downloaded: 0, inProgress: false });
           }
         }
+
+        let refreshPromise = null;
+        const refreshUrls = async (force = false) => {
+          if (refreshPromise) return refreshPromise;
+          refreshPromise = (async () => {
+            try {
+              const fresh = await getUrlsFn(force);
+              if (Array.isArray(fresh) && fresh.length > 0) {
+                streamUrls = fresh;
+              }
+              return streamUrls;
+            } finally {
+              refreshPromise = null;
+            }
+          })();
+          return refreshPromise;
+        };
 
         const stateInterval = setInterval(() => {
           if (!this.isCancelled && chunks.length > 0) {
@@ -2284,7 +3182,6 @@ class DownloaderEngine extends EventEmitter {
             }
             chunk.inProgress = true;
 
-            let workerUrl = currentUrl;
             let failureCount = 0;
 
             while (true) {
@@ -2292,9 +3189,17 @@ class DownloaderEngine extends EventEmitter {
               const currentStart = chunk.startByte + chunk.downloaded;
               if (currentStart > chunk.endByte) break;
 
+              // Stick to assigned mirror URL for this worker to prevent CDN Range snapping shifts
+              let workerUrl = streamUrls[workerIndex % streamUrls.length];
+              if (failureCount > 2) {
+                // Persistent failure on assigned mirror: switch mirror and preserve downloaded progress
+                workerUrl = streamUrls[(workerIndex + failureCount) % streamUrls.length];
+              }
+
+              let response = null;
               try {
                 const chunkHeaders = { ...headers, 'Range': `bytes=${currentStart}-${chunk.endByte}` };
-                const response = await axios({
+                response = await axios({
                   method: 'GET',
                   url: workerUrl,
                   responseType: 'stream',
@@ -2306,7 +3211,21 @@ class DownloaderEngine extends EventEmitter {
                 });
 
                 if (response.status === 200 && (currentStart > 0 || chunk.endByte < streamTotalBytes - 1)) {
+                  chunk.downloaded = 0;
                   throw new Error('Server returned full stream (200 OK) instead of partial range (206)');
+                }
+
+                // Verify Content-Range header to guarantee alignment with requested byte range
+                const contentRange = response.headers['content-range'];
+                if (contentRange) {
+                  const rangeMatch = contentRange.match(/bytes\s+(\d+)-(\d+)\/(\d+)/i);
+                  if (rangeMatch) {
+                    const serverStart = parseInt(rangeMatch[1], 10);
+                    if (serverStart !== currentStart) {
+                      chunk.downloaded = 0;
+                      throw new Error(`Content-Range start mismatch: requested ${currentStart}, server returned ${serverStart}. Resetting chunk to start.`);
+                    }
+                  }
                 }
 
                 await new Promise((resolveChunk, rejectChunk) => {
@@ -2315,13 +3234,51 @@ class DownloaderEngine extends EventEmitter {
                   let pendingBytes = 0;
                   let lastFlush = Date.now();
                   let stallTimer = null;
+                  let settled = false;
+
+                  const cleanup = () => {
+                    if (stallTimer) {
+                      clearTimeout(stallTimer);
+                      stallTimer = null;
+                    }
+                    if (stream) {
+                      stream.removeAllListeners('data');
+                      stream.removeAllListeners('end');
+                      stream.removeAllListeners('error');
+                      stream.removeAllListeners('close');
+                    }
+                  };
+
+                  const abortConnection = (err) => {
+                    cleanup();
+                    // Drop unflushed unverified partial buffers on abort/error to maintain clean byte alignment
+                    pendingBuffers = [];
+                    pendingBytes = 0;
+                    try {
+                      if (response && response.request) {
+                        if (response.request.socket && !response.request.socket.destroyed) {
+                          response.request.socket.destroy();
+                        }
+                        if (!response.request.destroyed) {
+                          response.request.destroy();
+                        }
+                      }
+                    } catch (e) {}
+                    try {
+                      if (stream && !stream.destroyed) {
+                        stream.destroy(err);
+                      }
+                    } catch (e) {}
+                  };
 
                   const resetStallTimer = () => {
                     if (stallTimer) clearTimeout(stallTimer);
                     stallTimer = setTimeout(() => {
-                      if (stream && typeof stream.destroy === 'function') {
-                        stream.destroy(new Error('Connection data stall (15s inactivity)'));
-                      }
+                      if (settled) return;
+                      settled = true;
+                      const stallErr = new Error('Connection data stall (15s inactivity)');
+                      abortConnection(stallErr);
+                      rejectChunk(stallErr);
                     }, 15000);
                   };
                   resetStallTimer();
@@ -2342,10 +3299,26 @@ class DownloaderEngine extends EventEmitter {
 
                   stream.on('data', (buffer) => {
                     resetStallTimer();
-                    if (this.isCancelled) { stream.destroy(); return; }
+                    if (this.isCancelled) {
+                      settled = true;
+                      abortConnection(new Error('Cancelled'));
+                      return;
+                    }
                     try {
                       pendingBuffers.push(buffer);
                       pendingBytes += buffer.length;
+
+                      if (this.bandwidthLimiter && this.bandwidthLimiter.isEnabled()) {
+                        const throttleDelayMs = this.bandwidthLimiter.consume(buffer.length);
+                        if (throttleDelayMs > 0) {
+                          stream.pause();
+                          setTimeout(() => {
+                            if (!settled && stream && !stream.destroyed) {
+                              try { stream.resume(); } catch (e) {}
+                            }
+                          }, throttleDelayMs);
+                        }
+                      }
 
                       const flushAge = Date.now() - lastFlush;
                       if (pendingBytes >= tuning.flushThresholdBytes || flushAge >= tuning.flushIntervalMs) {
@@ -2356,34 +3329,53 @@ class DownloaderEngine extends EventEmitter {
                         stream.resume();
                       }
                     } catch (e) {
-                      if (stallTimer) clearTimeout(stallTimer);
-                      stream.destroy();
-                      rejectChunk(e);
+                      if (!settled) {
+                        settled = true;
+                        abortConnection(e);
+                        rejectChunk(e);
+                      }
                     }
                   });
 
                   stream.on('end', () => {
-                    if (stallTimer) clearTimeout(stallTimer);
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
                     try {
                       flushPending();
                       const expectedTotal = chunk.endByte - chunk.startByte + 1;
                       if (chunk.downloaded < expectedTotal) {
+                        abortConnection(new Error(`Stream ended prematurely: ${chunk.downloaded}/${expectedTotal} bytes`));
                         rejectChunk(new Error(`Stream ended prematurely: ${chunk.downloaded}/${expectedTotal} bytes`));
                       } else {
                         resolveChunk();
                       }
                     } catch (e) {
+                      abortConnection(e);
                       rejectChunk(e);
                     }
                   });
 
                   stream.on('error', (err) => {
-                    if (stallTimer) clearTimeout(stallTimer);
+                    if (settled) return;
+                    settled = true;
+                    abortConnection(err);
                     rejectChunk(err);
                   });
                 });
                 break; // Chunk succeeded!
               } catch (err) {
+                // Ensure socket is destroyed on any catch to eliminate connection reuse desync
+                try {
+                  if (response && response.request) {
+                    if (response.request.socket && !response.request.socket.destroyed) {
+                      response.request.socket.destroy();
+                    }
+                    if (!response.request.destroyed) {
+                      response.request.destroy();
+                    }
+                  }
+                } catch (e) {}
                 if (axios.isCancel(err) || this.isCancelled) break;
                 failureCount++;
                 logPhase('warn', `${type} worker chunk [${chunk.startByte}-${chunk.endByte}] retry ${failureCount}/${tuning.maxChunkRetries}: ${err.message}`, {
@@ -2392,10 +3384,12 @@ class DownloaderEngine extends EventEmitter {
                   error: err.message
                 });
 
-                // Rotate mirror URL on any error
-                try {
-                  workerUrl = await getUrlFn(failureCount > 2, failureCount);
-                } catch (e) {}
+                // Failover to alternative mirror and refresh DASH manifest if retries persist
+                if (failureCount > 2) {
+                  try {
+                    await refreshUrls(true);
+                  } catch (e) {}
+                }
 
                 if (failureCount > tuning.maxChunkRetries) {
                   logPhase('error', `${type} worker exceeded retry limit on chunk [${chunk.startByte}-${chunk.endByte}]`, {
@@ -2416,23 +3410,32 @@ class DownloaderEngine extends EventEmitter {
           }
         });
 
-        await Promise.all(workerPromises);
-        clearInterval(stateInterval);
+        try {
+          await Promise.all(workerPromises);
+        } finally {
+          clearInterval(stateInterval);
+          if (sharedFd !== null) {
+            try { fs.closeSync(sharedFd); sharedFd = null; } catch(e) {}
+          }
+          if (chunks.length > 0) {
+            try {
+              fs.writeFileSync(stateFile, JSON.stringify({
+                streamTotalBytes,
+                chunks: chunks.map(c => ({ startByte: c.startByte, endByte: c.endByte, downloaded: c.downloaded }))
+              }), 'utf8');
+            } catch(e) {}
+          }
+        }
         
         if (!this.isCancelled) {
-          try { fs.writeFileSync(stateFile, JSON.stringify({ streamTotalBytes, chunks: chunks.map(c => ({ startByte: c.startByte, endByte: c.endByte, downloaded: c.downloaded })) }), 'utf8'); } catch(e){}
-          if (sharedFd !== null) { try { fs.closeSync(sharedFd); } catch(e){} }
-          
           const totalExpected = chunks.reduce((acc, c) => acc + (c.endByte - c.startByte + 1), 0);
-          const totalGot = chunks.reduce((acc, c) => acc + c.downloaded, 0);
-          if (totalExpected === totalGot && fs.existsSync(stateFile)) {
-             try { fs.unlinkSync(stateFile); } catch(e){}
+          if (totalExpected === totalGot) {
+             if (fs.existsSync(stateFile)) { try { fs.unlinkSync(stateFile); } catch(e){} }
+             if (fs.existsSync(tempPath + '.aria2')) { try { fs.unlinkSync(tempPath + '.aria2'); } catch(e){} }
           }
           if (streamTotalBytes > 0 && totalGot < totalExpected) {
             throw new Error(`${type} stream incomplete: received ${totalGot} of ${totalExpected} bytes`);
           }
-        } else {
-          if (sharedFd !== null) { try { fs.closeSync(sharedFd); } catch(e){} }
         }
         logPhase('info', `${type} stream finished in ${Date.now() - streamStartedAt}ms`);
       };
@@ -2460,7 +3463,7 @@ class DownloaderEngine extends EventEmitter {
         }
       }, 250);
 
-      const getVidUrl = async (force = false, mirrorIdx = 0) => { 
+      const getVidUrls = async (force = false) => { 
         await getDashUrls(force); 
         let vTrack = null;
         if (cachedDash && Array.isArray(cachedDash.video)) {
@@ -2471,10 +3474,10 @@ class DownloaderEngine extends EventEmitter {
           if (!vTrack) vTrack = getBestVideoTrack(cachedDash);
         }
         if (!vTrack) throw new Error("No video tracks found in manifest");
-        const urls = [vTrack.baseUrl, ...(vTrack.backupUrl || []), ...(vTrack.backup_url || [])].filter(Boolean);
-        return urls[mirrorIdx % urls.length] || vTrack.baseUrl; 
+        let urls = [vTrack.baseUrl, ...(vTrack.backupUrl || []), ...(vTrack.backup_url || [])].filter(Boolean);
+        return await this.probeBilibiliMirrors(urls, headers, controller);
       };
-      const getAudUrl = async (force = false, mirrorIdx = 0) => { 
+      const getAudUrls = async (force = false) => { 
         await getDashUrls(force); 
         let aTrack = null;
         if (cachedDash && Array.isArray(cachedDash.audio)) {
@@ -2484,13 +3487,37 @@ class DownloaderEngine extends EventEmitter {
           if (!aTrack) aTrack = getBestAudioTrack(cachedDash);
         }
         if (!aTrack) return null;
-        const urls = [aTrack.baseUrl, ...(aTrack.backupUrl || []), ...(aTrack.backup_url || [])].filter(Boolean);
-        return urls[mirrorIdx % urls.length] || aTrack.baseUrl; 
+        let urls = [aTrack.baseUrl, ...(aTrack.backupUrl || []), ...(aTrack.backup_url || [])].filter(Boolean);
+        return await this.probeBilibiliMirrors(urls, headers, controller);
       };
 
+      const isMp3 = String(settings.fileType || '').toLowerCase().includes('mp3') ||
+                    String(settings.fileFormat || '').toLowerCase().includes('mp3') ||
+                    String(item.type || '').toLowerCase().includes('mp3');
+
+      if (isMp3 && audioInfo) {
+        logPhase('info', 'Audio-only MP3 format requested: downloading audio stream directly');
+        await downloadStream('audio', getAudUrls, audioTemp);
+        clearInterval(progressTimer);
+        const mp3Out = filePath.replace(/\.[^.]+$/, '.mp3');
+        await new Promise((resolve, reject) => {
+          const ffmpegExe = this.getBinPath('ffmpeg.exe');
+          const ffArgs = ['-y', '-i', audioTemp, '-vn', '-c:a', 'libmp3lame', '-q:a', '0', mp3Out];
+          const { spawn } = require('child_process');
+          const p = spawn(ffmpegExe, ffArgs);
+          p.on('close', code => code === 0 ? resolve() : reject(new Error(`FFmpeg MP3 convert exited ${code}`)));
+        });
+        if (fs.existsSync(audioTemp)) { try { fs.unlinkSync(audioTemp); } catch(e){} }
+        if (filePath !== mp3Out && fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch(e){} }
+        if (finalize) {
+          await this.finalizeCompletedItem(item, mp3Out, settings);
+        }
+        return true;
+      }
+
       logPhase('info', `Launching DASH workers${audioInfo ? ' for video and audio' : ' for video only'}`);
-      const promises = [downloadStream('video', getVidUrl, videoTemp)];
-      if (audioInfo) promises.push(downloadStream('audio', getAudUrl, audioTemp));
+      const promises = [downloadStream('video', getVidUrls, videoTemp)];
+      if (audioInfo) promises.push(downloadStream('audio', getAudUrls, audioTemp));
       
       await Promise.all(promises);
       clearInterval(progressTimer);
@@ -2506,19 +3533,57 @@ class DownloaderEngine extends EventEmitter {
       if (audioInfo && (!fs.existsSync(audioTemp) || fs.statSync(audioTemp).size < 1024)) {
         throw new Error('Audio stream file missing or invalid before merge');
       }
-
-      logPhase('info', 'Merging DASH streams with FFmpeg');
-      this.emit('item-progress', { id: item.id, status: 'Merging Video & Audio (FFmpeg)...', percentage: 99, downloadedMB: (totalBytes / (1024 * 1024)).toFixed(2), speedMbps: '0.00' });
-      
-      await this.muxBilibiliDash(videoTemp, audioInfo ? audioTemp : null, filePath);
-      logPhase('info', 'FFmpeg merge finished');
-
-      const isMuxValid = await this.validateMediaFile(filePath);
-      if (!isMuxValid) {
-        throw new Error('Merged video file failed integrity verification (corrupted container or incomplete streams)');
+      const vState = videoTemp + '.state.json';
+      const aState = audioTemp + '.state.json';
+      const vAria = videoTemp + '.aria2';
+      const aAria = audioTemp + '.aria2';
+      if (fs.existsSync(vState) || fs.existsSync(vAria)) {
+        const vSize = fs.existsSync(videoTemp) ? fs.statSync(videoTemp).size : 0;
+        if (vSize >= 100 * 1024) {
+          try { if (fs.existsSync(vState)) fs.unlinkSync(vState); } catch(e){}
+          try { if (fs.existsSync(vAria)) fs.unlinkSync(vAria); } catch(e){}
+        } else {
+          throw new Error('Video stream download incomplete (state or aria2 control file still present), aborting merge to prevent corrupt video');
+        }
+      }
+      if (audioInfo && (fs.existsSync(aState) || fs.existsSync(aAria))) {
+        const aSize = fs.existsSync(audioTemp) ? fs.statSync(audioTemp).size : 0;
+        if (aSize >= 10 * 1024) {
+          try { if (fs.existsSync(aState)) fs.unlinkSync(aState); } catch(e){}
+          try { if (fs.existsSync(aAria)) fs.unlinkSync(aAria); } catch(e){}
+        } else {
+          throw new Error('Audio stream download incomplete (state or aria2 control file still present), aborting merge to prevent corrupt video');
+        }
       }
 
-      if (settings.downloadSubtitles !== false) {
+      const partFilePath = filePath + '.part.mp4';
+      logPhase('info', 'Merging DASH streams with FFmpeg to temporary part container');
+      this.emit('item-progress', { id: item.id, status: 'Merging Video & Audio (FFmpeg)...', percentage: 99, downloadedMB: (totalBytes / (1024 * 1024)).toFixed(2), speedMbps: '0.00' });
+      
+      await this.muxBilibiliDash(videoTemp, audioInfo ? audioTemp : null, partFilePath);
+      logPhase('info', 'FFmpeg merge finished');
+
+      const isMuxValid = await this.validateMediaFile(partFilePath);
+      const partStat = fs.existsSync(partFilePath) ? fs.statSync(partFilePath) : null;
+      const minExpectedBytes = Math.round(0.85 * totalBytes);
+      if (!isMuxValid || !partStat || (totalBytes > 0 && partStat.size < minExpectedBytes)) {
+        throw new Error(`Merged video file failed integrity verification (size: ${partStat ? partStat.size : 0} bytes, expected >= ${minExpectedBytes})`);
+      }
+
+      // Atomically promote part file to final output
+      if (fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); } catch (e) {}
+      }
+      fs.renameSync(partFilePath, filePath);
+      logPhase('info', `Verified and finalized: ${path.basename(filePath)} (${(partStat.size / (1024 * 1024)).toFixed(2)} MB)`);
+
+      // Cleanup temp streams only after successful promotion
+      if (fs.existsSync(videoTemp)) { try { fs.unlinkSync(videoTemp); } catch(e){} }
+      if (audioInfo && fs.existsSync(audioTemp)) { try { fs.unlinkSync(audioTemp); } catch(e){} }
+      try { fs.unlinkSync(videoTemp + '.aria2'); } catch(e){}
+      if (audioInfo) { try { fs.unlinkSync(audioTemp + '.aria2'); } catch(e){} }
+
+      if (settings.downloadSubtitles !== false && (!item.subtitleFiles || item.subtitleFiles.length === 0)) {
         logPhase('info', 'Fetching subtitles');
         const subtitleFiles = await this.downloadBilibiliSubtitles(item, headers, cid, filePath, bvidMatch, aidMatch, pageNum, settings);
         if (subtitleFiles.length > 0) {
@@ -2541,14 +3606,23 @@ class DownloaderEngine extends EventEmitter {
       if (this.isCancelled) return;
       this.activeControllers.delete(item.id);
       this.speedMetrics.delete(item.id);
-      logPhase('error', `Bilibili DASH failed: ${err.message}`, { error: err.message });
-      if (fs.existsSync(videoTemp)) { try { fs.unlinkSync(videoTemp); } catch(e){} }
-      if (fs.existsSync(audioTemp)) { try { fs.unlinkSync(audioTemp); } catch(e){} }
+      // Clean up failed output
+      const partFilePath = filePath + '.part.mp4';
+      if (fs.existsSync(partFilePath)) { try { fs.unlinkSync(partFilePath); } catch(e){} }
       if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch(e){} }
+      if (err.message && err.message.includes('integrity verification')) {
+        // If merged video failed integrity verification, clear corrupted temp video stream so user retry doesn't re-merge corrupt data
+        if (fs.existsSync(videoTemp)) { try { fs.unlinkSync(videoTemp); } catch(e){} }
+        const vState = videoTemp + '.state.json';
+        if (fs.existsSync(vState)) { try { fs.unlinkSync(vState); } catch(e){} }
+      }
       if (finalize) {
-        this.runningCount--;
-        this.emit('item-progress', { id: item.id, status: `Error: ${err.message}`, percentage: 0, downloadedMB: '0.00' });
-        this.processNextInQueue(settings);
+        this.decrementRunning(item);
+        const currentPct = totalBytes > 0 ? Math.min(99, Math.round((downloadedBytes / totalBytes) * 100)) : (item.percentage || 0);
+        const currentMB = totalBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : (item.downloadedMB || '0.00');
+        this.emit('item-progress', { id: item.id, status: `Error: ${err.message}`, percentage: currentPct, downloadedMB: currentMB });
+        this.checkAndFillPools(settings);
+        this.checkQueueCompleted();
       }
       return false;
     }
@@ -2558,9 +3632,172 @@ class DownloaderEngine extends EventEmitter {
     return await this.downloadBilibiliDASH(item, filePath, settings, { finalize: false });
   }
 
+  alignDashFmp4(filePath) {
+    if (!filePath || !fs.existsSync(filePath)) return false;
+    try {
+      const fd = fs.openSync(filePath, 'r');
+      const stat = fs.fstatSync(fd);
+      if (stat.size < 1024 * 1024) {
+        fs.closeSync(fd);
+        return false;
+      }
+
+      // Check for sidx box
+      const sidxHeader = Buffer.alloc(16);
+      let sidxOffset = -1;
+      let sidxSize = 0;
+      let pos = 0;
+      while (pos < 200000 && pos < stat.size - 16) {
+        fs.readSync(fd, sidxHeader, 0, 16, pos);
+        const boxSize = sidxHeader.readUInt32BE(0);
+        const boxType = sidxHeader.toString('latin1', 4, 8);
+        if (boxType === 'sidx') {
+          sidxOffset = pos;
+          sidxSize = boxSize;
+          break;
+        }
+        if (boxType === 'moof') break;
+        if (boxSize <= 0 || boxSize > 5000000) break;
+        pos += boxSize;
+      }
+
+      if (sidxOffset === -1 || sidxSize <= 32 || sidxSize > 500000) {
+        fs.closeSync(fd);
+        return false;
+      }
+
+      // Read sidx
+      const sidxBuf = Buffer.alloc(sidxSize);
+      fs.readSync(fd, sidxBuf, 0, sidxSize, sidxOffset);
+      const version = sidxBuf.readUInt8(8);
+      let sOffset = 20;
+      if (version === 0) {
+        sOffset += 8;
+      } else {
+        sOffset += 16;
+      }
+      sOffset += 2; // reserved
+      const refCount = sidxBuf.readUInt16BE(sOffset); sOffset += 2;
+      if (refCount < 2 || refCount > 50000) {
+        fs.closeSync(fd);
+        return false;
+      }
+
+      let runningOffset = sidxOffset + sidxSize;
+      let segments = [];
+      for (let i = 0; i < refCount; i++) {
+        if (sOffset + 12 > sidxSize) break;
+        const ref = sidxBuf.readUInt32BE(sOffset); sOffset += 4;
+        const refSize = ref & 0x7FFFFFFF;
+        sOffset += 8; // skip duration and flags
+        segments.push({ expectedOffset: runningOffset, expectedSize: refSize });
+        runningOffset += refSize;
+      }
+
+      // Quick probe to check if alignment is actually needed
+      let hasShift = false;
+      const testBuf = Buffer.alloc(16);
+      const step = Math.max(1, Math.floor(segments.length / 50));
+      for (let i = 0; i < segments.length; i += step) {
+        fs.readSync(fd, testBuf, 0, 16, segments[i].expectedOffset);
+        if (testBuf.toString('latin1', 4, 8) !== 'moof') {
+          hasShift = true;
+          break;
+        }
+      }
+
+      if (!hasShift) {
+        fs.closeSync(fd);
+        return false;
+      }
+
+      this.emitLog('info', `Detected shifted DASH fMP4 fragments in ${path.basename(filePath)}. Re-aligning container...`);
+
+      const repairedPath = filePath + '.aligned.tmp';
+      const dstFd = fs.openSync(repairedPath, 'w');
+      const firstMoofOffset = segments[0].expectedOffset;
+
+      // Copy init segment
+      const initBuf = Buffer.alloc(firstMoofOffset);
+      fs.readSync(fd, initBuf, 0, firstMoofOffset, 0);
+      fs.writeSync(dstFd, initBuf, 0, firstMoofOffset, 0);
+      let dstOffset = firstMoofOffset;
+
+      const headerBuf = Buffer.alloc(16);
+      const searchRange = 1024 * 1024;
+      const searchBuf = Buffer.alloc(searchRange * 2);
+
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        let actualMoofOffset = seg.expectedOffset;
+
+        fs.readSync(fd, headerBuf, 0, 8, actualMoofOffset);
+        if (headerBuf.toString('latin1', 4, 8) !== 'moof') {
+          const startRead = Math.max(0, seg.expectedOffset - searchRange);
+          const bytesRead = fs.readSync(fd, searchBuf, 0, searchBuf.length, startRead);
+          let sPos = 0;
+          let bestOffset = null;
+          let minDiff = Infinity;
+          while (true) {
+            const idx = searchBuf.indexOf('moof', sPos);
+            if (idx === -1 || idx >= bytesRead) break;
+            const cand = startRead + idx - 4;
+            const diff = Math.abs(cand - seg.expectedOffset);
+            if (diff < minDiff) {
+              minDiff = diff;
+              bestOffset = cand;
+            }
+            sPos = idx + 4;
+          }
+          if (bestOffset !== null) actualMoofOffset = bestOffset;
+        }
+
+        fs.readSync(fd, headerBuf, 0, 8, actualMoofOffset);
+        const moofSize = headerBuf.readUInt32BE(0);
+        const mdatOffset = actualMoofOffset + moofSize;
+        fs.readSync(fd, headerBuf, 0, 8, mdatOffset);
+        let mdatSize = headerBuf.readUInt32BE(0);
+        let mdatType = headerBuf.toString('latin1', 4, 8);
+
+        let segTotalSize = moofSize + mdatSize;
+        if (mdatType !== 'mdat' || segTotalSize > 10 * 1024 * 1024) {
+          segTotalSize = seg.expectedSize;
+          mdatSize = segTotalSize - moofSize;
+        }
+
+        const segBuf = Buffer.alloc(segTotalSize);
+        fs.readSync(fd, segBuf, 0, segTotalSize, actualMoofOffset);
+
+        if (segBuf.toString('latin1', moofSize + 4, moofSize + 8) !== 'mdat') {
+          segBuf.writeUInt32BE(mdatSize, moofSize);
+          segBuf.write('mdat', moofSize + 4, 4, 'latin1');
+        }
+
+        fs.writeSync(dstFd, segBuf, 0, segTotalSize, dstOffset);
+        dstOffset += segTotalSize;
+      }
+
+      fs.closeSync(fd);
+      fs.closeSync(dstFd);
+
+      // Atomically replace filePath with aligned file
+      fs.unlinkSync(filePath);
+      fs.renameSync(repairedPath, filePath);
+      this.emitLog('info', `DASH container alignment complete for ${path.basename(filePath)} (${(dstOffset / (1024*1024)).toFixed(2)} MB)`);
+      return true;
+    } catch (err) {
+      this.emitLog('warn', `DASH container auto-alignment failed: ${err.message}`);
+      return false;
+    }
+  }
+
   async muxBilibiliDash(videoTemp, audioTemp, outputPath) {
     const { spawn } = require('child_process');
     const ffmpegExe = this.getBinPath('ffmpeg.exe');
+
+    if (videoTemp && fs.existsSync(videoTemp)) {
+      try { this.alignDashFmp4(videoTemp); } catch(e) {}
+    }
 
     return new Promise((resolve, reject) => {
       let args = [
@@ -2576,9 +3813,8 @@ class DownloaderEngine extends EventEmitter {
       args.push('-c:v', 'copy');
       if (audioTemp) args.push('-c:a', 'copy');
       args.push('-max_muxing_queue_size', '9999');
-      args.push('-max_interleave_delta', '0');
-      args.push('-avoid_negative_ts', 'make_zero');
       args.push('-movflags', '+faststart');
+      args.push('-f', 'mp4');
       args.push(outputPath);
 
       let proc = spawn(ffmpegExe, args);
@@ -2587,8 +3823,6 @@ class DownloaderEngine extends EventEmitter {
       
       proc.on('close', (code) => {
         if (code === 0) {
-          if (fs.existsSync(videoTemp)) { try { fs.unlinkSync(videoTemp); } catch(e){} }
-          if (audioTemp && fs.existsSync(audioTemp)) { try { fs.unlinkSync(audioTemp); } catch(e){} }
           resolve();
         } else {
           // Stream-copy failed due to timestamp jitter / gaps on long video. Attempt audio resync repair merge.
@@ -2611,6 +3845,7 @@ class DownloaderEngine extends EventEmitter {
           fallbackArgs.push('-max_muxing_queue_size', '9999');
           fallbackArgs.push('-avoid_negative_ts', 'make_zero');
           fallbackArgs.push('-movflags', '+faststart');
+          fallbackArgs.push('-f', 'mp4');
           fallbackArgs.push(outputPath);
 
           let fbProc = spawn(ffmpegExe, fallbackArgs);
@@ -2618,8 +3853,6 @@ class DownloaderEngine extends EventEmitter {
           fbProc.stderr.on('data', (d) => fbStderr += d.toString());
           fbProc.on('close', (fbCode) => {
             if (fbCode === 0) {
-              if (fs.existsSync(videoTemp)) { try { fs.unlinkSync(videoTemp); } catch(e){} }
-              if (audioTemp && fs.existsSync(audioTemp)) { try { fs.unlinkSync(audioTemp); } catch(e){} }
               resolve();
             } else {
               reject(new Error(`FFmpeg merge failed (Code ${fbCode}): ${fbStderr.slice(-300)}`));
@@ -2632,12 +3865,15 @@ class DownloaderEngine extends EventEmitter {
 
   // CORE ENGINE: Multi-Threaded Chunk Requests (HTTP Range Headers)
   async downloadWithParallelChunks(downloadUrl, filePath, item, settings, headers) {
-    const numThreads = Math.min(32, Math.max(2, parseInt(settings.threads || 16, 10)));
+    const isWifiFriendly = settings.wifiFriendly !== false && settings.speedLimitMode !== 'unlimited';
+    const maxAllowedThreads = isWifiFriendly ? 6 : 16;
+    const numThreads = Math.min(maxAllowedThreads, Math.max(2, parseInt(settings.threads || (isWifiFriendly ? 6 : 12), 10)));
     const controller = new AbortController();
     this.activeControllers.set(item.id, controller);
-    this.emitLog('info', `Parallel download start for item ${item.id} with ${numThreads} worker(s)`, {
+    this.emitLog('info', `Parallel download start for item ${item.id} with ${numThreads} worker(s) (Wi-Fi Friendly=${isWifiFriendly ? 'ON' : 'OFF'})`, {
       itemId: item.id,
       threads: numThreads,
+      isWifiFriendly,
       filePath
     });
 
@@ -2766,6 +4002,7 @@ class DownloaderEngine extends EventEmitter {
     const workerPromises = chunks.map(async (chunk) => {
       for (let attempt = 1; attempt <= 3; attempt++) {
         if (this.isCancelled) break;
+        let response = null;
         try {
           const currentStart = chunk.startByte + chunk.downloaded;
           if (currentStart > chunk.endByte) break; // Chunk completed
@@ -2775,7 +4012,7 @@ class DownloaderEngine extends EventEmitter {
             'Range': `bytes=${currentStart}-${chunk.endByte}`
           };
 
-          const response = await axios({
+          response = await axios({
             method: 'GET',
             url: downloadUrl,
             responseType: 'stream',
@@ -2790,38 +4027,104 @@ class DownloaderEngine extends EventEmitter {
             throw new Error('Server returned 200 OK instead of 206 Partial Content during range query');
           }
 
+          const contentRange = response.headers['content-range'];
+          if (contentRange) {
+            const rangeMatch = contentRange.match(/bytes\s+(\d+)-(\d+)\/(\d+)/i);
+            if (rangeMatch) {
+              const serverStart = parseInt(rangeMatch[1], 10);
+              if (serverStart !== currentStart) {
+                throw new Error(`Content-Range start mismatch: requested ${currentStart}, server returned ${serverStart}`);
+              }
+            }
+          }
+
           await new Promise((resolveChunk, rejectChunk) => {
             const stream = response.data;
+            let settled = false;
+
+            const cleanup = () => {
+              if (stream) {
+                stream.removeAllListeners('data');
+                stream.removeAllListeners('end');
+                stream.removeAllListeners('error');
+                stream.removeAllListeners('close');
+              }
+            };
+
+            const abort = (err) => {
+              cleanup();
+              try {
+                if (response && response.request) {
+                  if (response.request.socket && !response.request.socket.destroyed) response.request.socket.destroy();
+                  if (!response.request.destroyed) response.request.destroy();
+                }
+              } catch(e) {}
+              try {
+                if (stream && !stream.destroyed) stream.destroy(err);
+              } catch(e) {}
+            };
+
             stream.on('data', (buffer) => {
               if (this.isCancelled) {
-                stream.destroy();
+                settled = true;
+                abort(new Error('Cancelled'));
                 return;
               }
               try {
+                if (this.bandwidthLimiter && this.bandwidthLimiter.isEnabled()) {
+                  const throttleDelayMs = this.bandwidthLimiter.consume(buffer.length);
+                  if (throttleDelayMs > 0) {
+                    stream.pause();
+                    setTimeout(() => {
+                      if (!settled && stream && !stream.destroyed) {
+                        try { stream.resume(); } catch (e) {}
+                      }
+                    }, throttleDelayMs);
+                  }
+                }
+
                 const writeOffset = chunk.startByte + chunk.downloaded;
                 fs.writeSync(sharedFd, buffer, 0, buffer.length, writeOffset);
 
                 chunk.downloaded += buffer.length;
                 updateProgress();
               } catch (writeErr) {
-                stream.destroy();
-                rejectChunk(writeErr);
+                if (!settled) {
+                  settled = true;
+                  abort(writeErr);
+                  rejectChunk(writeErr);
+                }
               }
             });
 
             stream.on('end', () => {
+              if (settled) return;
+              settled = true;
+              cleanup();
               const expectedTotal = chunk.endByte - chunk.startByte + 1;
               if (chunk.downloaded < expectedTotal) {
+                abort(new Error(`Stream ended prematurely: ${chunk.downloaded}/${expectedTotal} bytes`));
                 rejectChunk(new Error(`Stream ended prematurely: ${chunk.downloaded}/${expectedTotal} bytes`));
               } else {
                 resolveChunk();
               }
             });
-            stream.on('error', rejectChunk);
+            stream.on('error', (err) => {
+              if (settled) return;
+              settled = true;
+              abort(err);
+              rejectChunk(err);
+            });
           });
 
           break; // Worker stream finished successfully
         } catch (err) {
+          try {
+            if (response && response.request) {
+              if (response.request.socket && !response.request.socket.destroyed) response.request.socket.destroy();
+              if (!response.request.destroyed) response.request.destroy();
+            }
+          } catch(e) {}
           if (axios.isCancel(err) || this.isCancelled) break;
           if (attempt === 3) throw err;
           await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));
@@ -2830,15 +4133,18 @@ class DownloaderEngine extends EventEmitter {
     });
 
     try {
-      await Promise.all(workerPromises);
-      clearInterval(stateInterval);
+      try {
+        await Promise.all(workerPromises);
+      } finally {
+        clearInterval(stateInterval);
+        if (sharedFd !== null) { try { fs.closeSync(sharedFd); sharedFd = null; } catch(e) {} }
+      }
       
       const totalExpected = chunks.reduce((acc, c) => acc + (c.endByte - c.startByte + 1), 0);
       const totalGot = chunks.reduce((acc, c) => acc + c.downloaded, 0);
 
       if (!this.isCancelled) {
         try { fs.writeFileSync(stateFile, JSON.stringify({ totalBytes, chunks }), 'utf8'); } catch(e){}
-        if (sharedFd !== null) { try { fs.closeSync(sharedFd); sharedFd = null; } catch(e) {} }
         
         if (totalExpected === totalGot && fs.existsSync(stateFile)) {
            try { fs.unlinkSync(stateFile); } catch(e){}
@@ -2846,8 +4152,6 @@ class DownloaderEngine extends EventEmitter {
         if (totalBytes > 0 && totalGot < totalExpected) {
           throw new Error(`Parallel download incomplete: received ${totalGot} of ${totalExpected} bytes`);
         }
-      } else {
-        if (sharedFd !== null) { try { fs.closeSync(sharedFd); sharedFd = null; } catch(e) {} }
       }
 
       this.activeControllers.delete(item.id);
@@ -2921,6 +4225,19 @@ class DownloaderEngine extends EventEmitter {
         const writer = fs.createWriteStream(filePath, { highWaterMark: 256 * 1024 });
         response.data.on('data', (chunk) => {
           if (this.isCancelled) return;
+
+          if (this.bandwidthLimiter && this.bandwidthLimiter.isEnabled()) {
+            const throttleDelayMs = this.bandwidthLimiter.consume(chunk.length);
+            if (throttleDelayMs > 0) {
+              response.data.pause();
+              setTimeout(() => {
+                if (response.data && !response.data.destroyed) {
+                  try { response.data.resume(); } catch (e) {}
+                }
+              }, throttleDelayMs);
+            }
+          }
+
           downloadedBytes += chunk.length;
 
           const now = Date.now();
@@ -2981,159 +4298,222 @@ class DownloaderEngine extends EventEmitter {
     return downloadSuccess;
   }
 
-  async processNextInQueue(settings) {
-    if (this.isCancelled || this.activeQueue.length === 0) {
-      if (this.runningCount === 0 && this.speedTimer) {
+  checkAndFillPools(settings) {
+    if (this.isCancelled) return;
+    while (this.runningGlobalCount < this.globalConcurrencyLimit && this.globalQueue.length > 0) {
+      this.processNextInPool('global', settings);
+    }
+    while (this.runningLocalCount < this.localConcurrencyLimit && this.localQueue.length > 0) {
+      this.processNextInPool('local', settings);
+    }
+  }
+
+  checkQueueCompleted() {
+    if (this.isCancelled) return;
+    if (
+      this.runningGlobalCount === 0 &&
+      this.runningLocalCount === 0 &&
+      this.globalQueue.length === 0 &&
+      this.localQueue.length === 0
+    ) {
+      if (this.speedTimer) {
         clearInterval(this.speedTimer);
         this.speedTimer = null;
-        this.broadcastGlobalStatus();
-        this.emit('queue-completed', { completed: this.completedCount, total: this.totalCount });
-        this.emitLog('info', `Queue completed: ${this.completedCount}/${this.totalCount}`);
       }
+      this.broadcastGlobalStatus();
+      this.emit('queue-completed', { completed: this.completedCount, total: this.totalCount });
+      this.emitLog('info', `Dual-speed queue completed: ${this.completedCount}/${this.totalCount}`);
+    }
+  }
+
+  async processNextInPool(pool, settings) {
+    if (this.isCancelled) return;
+
+    const queue = pool === 'local' ? this.localQueue : this.globalQueue;
+    const running = pool === 'local' ? this.runningLocalCount : this.runningGlobalCount;
+    const limit = pool === 'local' ? this.localConcurrencyLimit : this.globalConcurrencyLimit;
+
+    if (running >= limit || queue.length === 0) {
+      this.checkQueueCompleted();
       return;
     }
 
-    const item = this.activeQueue.shift();
-    this.runningCount++;
-    this.emitLog('info', `Processing item ${item.id}: ${item.title || item.movieName || 'Untitled'}`, {
-      itemId: item.id,
-      platform: item.platform,
-      url: item.downloadUrl || item.url || ''
-    });
-    const { targetDir, baseFilenameWithoutExt, filePath } = this.buildDownloadPaths(item, settings);
+    const item = queue.shift();
+    this.incrementRunning(item);
+    await this.executeItemDownload(item, settings);
+  }
 
-    // Ensure target directory exists
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
+  processNextInQueue(settings, item = null) {
+    if (item) {
+      this.decrementRunning(item);
     }
+    this.checkAndFillPools(settings);
+    this.checkQueueCompleted();
+  }
 
-    if (settings.subtitleOnly) {
-      const subtitlePath = await this.downloadSubtitleOnly(item, settings);
-      if (subtitlePath) {
-        item.subtitleFiles = [subtitlePath];
-        await this.finalizeCompletedItem(item, subtitlePath, settings, 'Completed');
-      } else {
-        this.runningCount--;
-        this.emit('item-progress', { id: item.id, status: 'Error: Subtitle download failed', percentage: 0, downloadedMB: '0.00' });
-        this.processNextInQueue(settings);
+  async executeItemDownload(item, settings) {
+    try {
+      this.emitLog('info', `Processing item ${item.id} [${item.speedPool || 'global'} speed channel]: ${item.title || item.movieName || 'Untitled'}`, {
+        itemId: item.id,
+        platform: item.platform,
+        speedPool: item.speedPool || 'global',
+        url: item.downloadUrl || item.url || ''
+      });
+      const { targetDir, baseFilenameWithoutExt, filePath } = this.buildDownloadPaths(item, settings);
+
+      // Ensure target directory exists
+      if (!fs.existsSync(targetDir)) {
+        fs.mkdirSync(targetDir, { recursive: true });
       }
-      return;
-    }
 
-    // 1. Download subtitle FIRST before starting video stream
-    if (settings.downloadSubtitles !== false) {
-      await this.ensureSubtitlesDownloaded(item, targetDir, baseFilenameWithoutExt, settings);
-    }
-
-    // 2. Check if video has already been downloaded: do not re-download, mark Completed
-    const existingOutput = this.resolveExistingOutputPath(targetDir, baseFilenameWithoutExt, filePath);
-    if (existingOutput) {
-      const isValid = await this.validateMediaFile(existingOutput);
-      if (isValid) {
-        this.emitLog('info', `Video already downloaded and verified for item ${item.id} (${path.basename(existingOutput)}). Skipping video download and marking Completed.`, {
-          itemId: item.id,
-          filePath: existingOutput
-        });
-
-        await this.finalizeCompletedItem(item, existingOutput, settings, 'Completed');
+      if (settings.subtitleOnly) {
+        const subtitlePath = await this.downloadSubtitleOnly(item, settings);
+        if (subtitlePath) {
+          item.subtitleFiles = [subtitlePath];
+          await this.finalizeCompletedItem(item, subtitlePath, settings, 'Completed');
+        } else {
+          this.decrementRunning(item);
+          this.emit('item-progress', { id: item.id, status: 'Error: Subtitle download failed', percentage: 0, downloadedMB: '0.00' });
+          this.checkAndFillPools(settings);
+          this.checkQueueCompleted();
+        }
         return;
-      } else {
-        this.emitLog('warn', `Found existing file for item ${item.id} (${path.basename(existingOutput)}) but it failed integrity verification (corrupted/incomplete). Removing to re-download cleanly.`, {
+      }
+
+      // 1. Download subtitle FIRST before starting video stream
+      if (settings.downloadSubtitles !== false) {
+        await this.ensureSubtitlesDownloaded(item, targetDir, baseFilenameWithoutExt, settings);
+      }
+
+      // 2. Check if video has already been downloaded: do not re-download, mark Completed
+      const existingOutput = this.resolveExistingOutputPath(targetDir, baseFilenameWithoutExt, filePath);
+      if (existingOutput) {
+        const isValid = await this.validateMediaFile(existingOutput);
+        if (isValid) {
+          this.emitLog('info', `Video already downloaded and verified for item ${item.id} (${path.basename(existingOutput)}). Skipping video download and marking Completed.`, {
+            itemId: item.id,
+            filePath: existingOutput
+          });
+
+          await this.finalizeCompletedItem(item, existingOutput, settings, 'Completed');
+          return;
+        } else {
+          this.emitLog('warn', `Found existing file for item ${item.id} (${path.basename(existingOutput)}) but it failed integrity verification (corrupted/incomplete). Removing to re-download cleanly.`, {
+            itemId: item.id,
+            filePath: existingOutput
+          });
+          try { fs.unlinkSync(existingOutput); } catch (e) {}
+        }
+      }
+
+      const targetUrlLower = (item.downloadUrl || item.url || '').toLowerCase();
+      const isBili = item.platform === 'BiliBili' || targetUrlLower.includes('bilibili') || targetUrlLower.includes('b23.tv') || targetUrlLower.includes('bibili');
+      const effectiveTimeRange = this.getEffectiveTimeRange(item, settings);
+      const hasTimeRange = Boolean(effectiveTimeRange && effectiveTimeRange.enabled);
+
+      if (isBili && !hasTimeRange) {
+        this.emitLog('info', `Routing item ${item.id} through high-speed Bilibili DASH pipeline`, {
           itemId: item.id,
-          filePath: existingOutput
+          platform: item.platform || 'BiliBili',
+          mode: settings?.bilibiliMode || 'fast'
         });
-        try { fs.unlinkSync(existingOutput); } catch (e) {}
+        const dashSuccess = await this.downloadBilibiliDASH(item, filePath, settings, { finalize: false });
+        if (this.isCancelled) {
+          this.decrementRunning(item);
+          this.emit('item-progress', { id: item.id, status: 'Cancelled (Paused)' });
+          this.checkQueueCompleted();
+          return;
+        }
+        const isValid = dashSuccess && fs.existsSync(filePath) && (await this.validateMediaFile(filePath));
+        if (dashSuccess && isValid) {
+          await this.finalizeCompletedItem(item, filePath, settings);
+        } else if (!this.isCancelled) {
+          if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch (e) {} }
+          this.emitLog('warn', `Bilibili DASH pipeline unsuccessful or invalid, falling back to resilient yt-dlp pipeline for item ${item.id}`, { itemId: item.id });
+          await this.downloadWithYtDlp(item, filePath, settings);
+        }
+        return;
       }
-    }
 
-    const targetUrlLower = (item.downloadUrl || item.url || '').toLowerCase();
-    const isBili = item.platform === 'BiliBili' || targetUrlLower.includes('bilibili') || targetUrlLower.includes('b23.tv') || targetUrlLower.includes('bibili');
-
-    if (isBili) {
-      this.emitLog('info', `Routing item ${item.id} through Bilibili DASH pipeline`, {
-        itemId: item.id,
-        mode: settings?.bilibiliMode || 'balanced'
-      });
-      const dashSuccess = await this.downloadBilibiliDASH(item, filePath, settings, { finalize: false });
-      const isValid = dashSuccess && fs.existsSync(filePath) && (await this.validateMediaFile(filePath));
-      if (dashSuccess && isValid) {
-        await this.finalizeCompletedItem(item, filePath, settings);
-      } else if (!this.isCancelled) {
-        if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch (e) {} }
-        this.emitLog('warn', `Bilibili DASH pipeline unsuccessful or invalid, falling back to resilient yt-dlp pipeline for item ${item.id}`, { itemId: item.id });
+      if (item.platform !== 'NovelQuick' && (hasTimeRange || item.useYtDlp || isBili || item.platform === 'YouTube' || item.platform === 'TikTok' || item.platform === 'DramaBox' || item.platform === 'DonghuaFun' || item.platform === 'Donghua' || item.platform === 'Dailymotion' || item.platform === 'GanJingWorld' || item.platform === 'Odysee' || item.platform === 'LBRY' || targetUrlLower.includes('dramabox') || targetUrlLower.includes('donghua') || targetUrlLower.includes('dailymotion') || targetUrlLower.includes('ganjingworld') || targetUrlLower.includes('youtube') || targetUrlLower.includes('youtu.be') || targetUrlLower.includes('tiktok') || targetUrlLower.includes('odysee.com') || targetUrlLower.includes('lbry.tv'))) {
+        this.emitLog('info', `Routing item ${item.id} through yt-dlp pipeline${hasTimeRange ? ' (custom time range active)' : ''}`, {
+          itemId: item.id,
+          platform: item.platform,
+          hasTimeRange
+        });
         await this.downloadWithYtDlp(item, filePath, settings);
+        return;
       }
-      return;
-    }
 
-    if (item.useYtDlp || item.platform === 'YouTube' || item.platform === 'TikTok' || item.platform === 'DramaBox' || targetUrlLower.includes('dramabox') || targetUrlLower.includes('youtube') || targetUrlLower.includes('youtu.be') || targetUrlLower.includes('tiktok')) {
-      this.emitLog('info', `Routing item ${item.id} through yt-dlp pipeline`, {
-        itemId: item.id,
-        platform: item.platform
-      });
-      await this.downloadWithYtDlp(item, filePath, settings);
-      return;
-    }
+      const downloadUrl = item.downloadUrl || item.url;
+      const userAgent = this.getModernUserAgent(settings, item);
+      const { cookieHeader } = this.prepareCookieConfig(settings, item, targetDir);
 
-    const downloadUrl = item.downloadUrl || item.url;
-    const userAgent = this.getModernUserAgent(settings, item);
-    const { cookieHeader } = this.prepareCookieConfig(settings, item, targetDir);
-
-    const headers = {
-      'User-Agent': userAgent,
-      'Accept': '*/*'
-    };
-    if (cookieHeader) {
-      headers['Cookie'] = cookieHeader;
-    }
-
-    // Execute Multi-Threaded Chunk Range download engine
-    const success = await this.downloadWithParallelChunks(downloadUrl, filePath, item, settings, headers);
-
-    this.runningCount--;
-    if (success && fs.existsSync(filePath)) {
-      this.completedCount++;
-      this.emitLog('info', `Parallel download completed for item ${item.id}`, {
-        itemId: item.id,
-        filePath
-      });
-      if (settings && settings.downloadThumbnails !== false) {
-        try {
-          const thumbPath = await this.downloadThumbnail(item, targetDir, baseFilenameWithoutExt, settings);
-          if (thumbPath) {
-            item.thumbnailFile = thumbPath;
-          }
-        } catch (e) {}
+      const headers = {
+        'User-Agent': userAgent,
+        'Accept': '*/*'
+      };
+      if (cookieHeader) {
+        headers['Cookie'] = cookieHeader;
       }
-      const stats = fs.statSync(filePath);
-      const totalBytes = stats.size;
-      this.emit('item-progress', {
-        id: item.id,
-        status: 'Completed',
-        percentage: 100,
-        downloadedMB: (totalBytes / (1024 * 1024)).toFixed(2),
-        speedMbps: '0.00',
-        filePath,
-        thumbnailPath: item.thumbnailFile || null
-      });
-    } else if (!this.isCancelled) {
-      this.emitLog('error', `Parallel download failed for item ${item.id}`, {
-        itemId: item.id,
-        filePath
-      });
-      this.emit('item-progress', {
-        id: item.id,
-        status: 'Error: Parallel download failed after retries',
-        percentage: 0,
-        downloadedMB: '0.00'
-      });
-      if (fs.existsSync(filePath)) {
-        try { fs.unlinkSync(filePath); } catch (e) {}
+      if (item.platform === 'NovelQuick' || (downloadUrl && (downloadUrl.includes('qznovel.com') || downloadUrl.includes('novelquickapp.com')))) {
+        headers['Referer'] = 'https://novelquickapp.com/';
       }
-    }
 
-    // Process next item right away
-    this.processNextInQueue(settings);
+      // Execute Multi-Threaded Chunk Range download engine
+      const success = await this.downloadWithParallelChunks(downloadUrl, filePath, item, settings, headers);
+
+      this.decrementRunning(item);
+      if (success && fs.existsSync(filePath)) {
+        this.completedCount++;
+        this.emitLog('info', `Parallel download completed for item ${item.id}`, {
+          itemId: item.id,
+          filePath
+        });
+        if (settings && settings.downloadThumbnails !== false) {
+          try {
+            const thumbPath = await this.downloadThumbnail(item, targetDir, baseFilenameWithoutExt, settings);
+            if (thumbPath) {
+              item.thumbnailFile = thumbPath;
+            }
+          } catch (e) {}
+        }
+        const stats = fs.statSync(filePath);
+        const totalBytes = stats.size;
+        this.emit('item-progress', {
+          id: item.id,
+          status: 'Completed',
+          percentage: 100,
+          downloadedMB: (totalBytes / (1024 * 1024)).toFixed(2),
+          speedMbps: '0.00',
+          filePath,
+          thumbnailPath: item.thumbnailFile || null
+        });
+      } else if (!this.isCancelled) {
+        this.emitLog('error', `Parallel download failed for item ${item.id}`, {
+          itemId: item.id,
+          filePath
+        });
+        this.emit('item-progress', {
+          id: item.id,
+          status: 'Error: Parallel download failed after retries',
+          percentage: 0,
+          downloadedMB: '0.00'
+        });
+        if (fs.existsSync(filePath)) {
+          try { fs.unlinkSync(filePath); } catch (e) {}
+        }
+      }
+
+      this.checkAndFillPools(settings);
+      this.checkQueueCompleted();
+    } catch (err) {
+      this.emitLog('error', `Unexpected error processing item ${item.id}: ${err.message}`, { itemId: item.id, error: err.message });
+      this.decrementRunning(item);
+      this.emit('item-progress', { id: item.id, status: `Error: ${err.message}`, percentage: 0, downloadedMB: '0.00' });
+      this.checkAndFillPools(settings);
+      this.checkQueueCompleted();
+    }
   }
 
   cancelAll() {
@@ -3151,8 +4531,19 @@ class DownloaderEngine extends EventEmitter {
     this.activeControllers.clear();
     this.speedMetrics.clear();
     this.activeQueue = [];
+    this.globalQueue = [];
+    this.localQueue = [];
     this.runningCount = 0;
-    this.emit('global-metrics', { totalSpeedMbps: '0.00', running: 0, completed: this.completedCount });
+    this.runningGlobalCount = 0;
+    this.runningLocalCount = 0;
+    this.emit('global-metrics', {
+      totalSpeedMbps: '0.00',
+      running: 0,
+      runningGlobal: 0,
+      runningLocal: 0,
+      completed: this.completedCount,
+      total: this.totalCount
+    });
   }
 
   broadcastGlobalStatus() {
@@ -3164,6 +4555,8 @@ class DownloaderEngine extends EventEmitter {
     this.emit('global-metrics', {
       totalSpeedMbps: totalMbps,
       running: this.runningCount,
+      runningGlobal: this.runningGlobalCount,
+      runningLocal: this.runningLocalCount,
       completed: this.completedCount,
       total: this.totalCount
     });

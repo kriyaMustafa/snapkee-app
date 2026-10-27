@@ -4,8 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SnapKee Studio Pro - Next-Gen Multi-Threaded Media Downloader</title>
-  <!-- Tailwind CSS via CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <meta name="referrer" content="no-referrer">
+  <!-- Local Offline Tailwind CSS Engine -->
+  <script src="assets/tailwind.js"></script>
   <link rel="stylesheet" href="styles.css">
   <script>
     tailwind.config = {
@@ -81,9 +82,9 @@
       </div>
 
       <!-- Parallel Engine Indicator -->
-      <div class="hidden lg:flex items-center space-x-1.5 bg-blue-950/40 border border-blue-500/30 px-2.5 py-1 rounded-lg text-[11px] font-semibold text-blue-300" title="Adaptive Multi-Segment Engine">
+      <div id="engineIndicator" class="hidden lg:flex items-center space-x-1.5 bg-blue-950/40 border border-blue-500/30 px-2.5 py-1 rounded-lg text-[11px] font-semibold text-blue-300" title="Active Wi-Fi QoS & Speed Profile">
         <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
-        <span>Adaptive 8–16 Threads</span>
+        <span id="engineIndicatorText">Smart Wi-Fi (30 MB/s 🛡️)</span>
       </div>
     </div>
 
@@ -128,6 +129,12 @@
       <button class="platform-pill platform-dramabox cursor-pointer hover:scale-105 transition" title="DramaBox Episodes">
         <span>🎬</span> DramaBox
       </button>
+      <button class="platform-pill platform-novelquick cursor-pointer hover:scale-105 transition" title="NovelQuick / Hongguo Short Drama">
+        <span>🍎</span> NovelQuick
+      </button>
+      <button class="platform-pill platform-odysee cursor-pointer hover:scale-105 transition" title="Odysee & LBRY Videos">
+        <span>🚀</span> Odysee
+      </button>
       <button class="platform-pill platform-generic cursor-pointer hover:scale-105 transition" title="1000+ Direct Video Websites">
         <span>🌐</span> All Sites
       </button>
@@ -138,7 +145,7 @@
       <input 
         type="text" 
         id="urlInput" 
-        placeholder="Paste YouTube, Bilibili, TikTok, Facebook, DramaBox, or video link here..." 
+        placeholder="Paste YouTube, Bilibili, TikTok, Facebook, DramaBox, NovelQuick, or video link here..." 
         value=""
         class="w-full bg-[#070b16] border border-[#25375e] rounded-lg pl-3.5 pr-20 py-2 text-xs text-slate-100 placeholder-slate-500 input-studio shadow-inner"
       />
@@ -230,9 +237,13 @@
 
           <!-- Select All Controls -->
           <label class="flex items-center gap-1.5 cursor-pointer text-xs font-semibold text-slate-300 hover:text-white">
-            <input type="checkbox" id="selectAllCheckbox" checked class="custom-checkbox">
+            <input type="checkbox" id="selectAllCheckbox" class="custom-checkbox">
             <span>Select All</span>
           </label>
+
+          <button id="btnOpenBatchTimeRange" class="text-xs text-cyan-300 hover:text-white border border-cyan-500/40 hover:border-cyan-400 bg-cyan-950/40 hover:bg-cyan-900/60 px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition shadow-sm" title="Configure Custom Download Range (Clip Section) for selected videos">
+            <span>✂️</span> <span>Clip Range</span>
+          </button>
 
           <button id="btnClearAll" class="text-xs text-slate-400 hover:text-red-400 border border-slate-700/60 hover:border-red-500/40 bg-slate-800/60 px-2.5 py-1 rounded-lg flex items-center gap-1 transition">
             <span>🗑️</span> Clear
@@ -265,7 +276,7 @@
             <thead>
               <tr>
                 <th class="w-8 text-center">
-                  <input type="checkbox" id="tableSelectAllCheckbox" checked class="custom-checkbox">
+                  <input type="checkbox" id="tableSelectAllCheckbox" class="custom-checkbox">
                 </th>
                 <th class="w-12 text-center text-slate-400">#</th>
                 <th class="w-20">Preview</th>
@@ -294,6 +305,9 @@
             <span class="text-[9px] text-blue-300 bg-blue-950/80 border border-blue-500/30 px-1.5 py-0.2 rounded font-mono">Real-time</span>
           </div>
           <div class="flex items-center space-x-2">
+            <button id="btnCopyLog" class="live-log-btn" title="Copy Engine Logs to Clipboard">
+              <span>📋</span> <span id="btnCopyLogText">Copy Logs</span>
+            </button>
             <button id="btnToggleLogSize" class="text-[10px] text-slate-400 hover:text-slate-200" title="Toggle Log Height">↕ Resize</button>
             <button id="btnClearLog" class="live-log-clear">Clear</button>
           </div>
@@ -369,6 +383,15 @@
         </div>
 
         <div class="flex items-center justify-between">
+          <label class="font-medium text-slate-300 text-[11px]" title="Smart Bitrate Engine compares AVC vs HEVC vs AV1 to pick the highest visual fidelity stream">Codec & Quality:</label>
+          <select id="selectVideoCodec" class="bg-[#060913] border border-[#233152] rounded-md px-2 py-1 text-slate-200 text-[11px] focus:outline-none w-36">
+            <option value="quality" selected>Best Quality (Auto 👑)</option>
+            <option value="compatible">Standard (H.264 / AVC)</option>
+            <option value="efficient">Small File (HEVC/AV1 ⚡)</option>
+          </select>
+        </div>
+
+        <div class="flex items-center justify-between">
           <label class="font-medium text-slate-300 text-[11px]">Bilibili Engine:</label>
           <select id="selectBilibiliMode" class="bg-[#060913] border border-[#233152] rounded-md px-2 py-1 text-slate-200 text-[11px] focus:outline-none w-36">
             <option value="fast" selected>Fast (16 Workers ⚡)</option>
@@ -378,8 +401,41 @@
         </div>
       </div>
 
-      <!-- Multi-Thread Concurrency & Authentication -->
+      <!-- Multi-Thread Concurrency & Wi-Fi QoS Authentication -->
       <div class="space-y-1.5">
+        <div class="flex items-center justify-between">
+          <label class="font-medium text-slate-300 text-[11px] flex items-center gap-1" title="Optimize Wi-Fi speed and prevent bufferbloat so other devices in the house never lag">
+            <span>Wi-Fi Speed & QoS:</span>
+            <span class="text-[9px] bg-emerald-950 border border-emerald-500/50 text-emerald-300 px-1 py-0.2 rounded font-bold">Shield</span>
+          </label>
+          <select id="selectSpeedLimit" class="bg-[#060913] border border-[#233152] rounded-md px-2 py-1 text-slate-200 text-[11px] focus:outline-none w-44">
+            <option value="10">100M Plan (10 MB/s / 80M 🛡️)</option>
+            <option value="11.5">100M Turbo (11.5 MB/s / 92M ⚡)</option>
+            <option value="8">100M Safe (8 MB/s / 64M 🍃)</option>
+            <option value="20">200M Plan (20 MB/s / 160M 🏎️)</option>
+            <option value="30">300M+ Plan (30 MB/s / 240M 🔥)</option>
+            <option value="5">50M Plan (5 MB/s / 40M 🌱)</option>
+            <option value="unlimited" selected>Max Speed (Uncapped 🚀 100%)</option>
+            <option value="custom">Custom Limit (MB/s)...</option>
+          </select>
+        </div>
+
+        <div id="customSpeedRow" class="hidden items-center justify-between">
+          <label class="font-medium text-slate-400 text-[10px]">Custom Max Speed:</label>
+          <div class="flex items-center gap-1">
+            <input 
+              type="number" 
+              id="inputCustomSpeed" 
+              min="0.5" 
+              max="500" 
+              step="0.5"
+              value="10" 
+              class="bg-[#060913] border border-[#233152] rounded px-2 py-0.5 text-cyan-300 font-mono text-center font-bold w-14 text-[11px]"
+            />
+            <span class="text-[10px] text-slate-500">MB/s</span>
+          </div>
+        </div>
+
         <div class="flex items-center justify-between">
           <label class="font-medium text-slate-300 text-[11px] flex items-center gap-1">
             <span>Adaptive Threads:</span>
@@ -391,11 +447,19 @@
               id="inputThreads" 
               min="2" 
               max="16" 
-              value="12" 
+              value="16" 
               class="bg-[#060913] border border-[#233152] rounded px-2 py-0.5 text-cyan-300 font-mono text-center font-bold w-14"
             />
             <span class="text-[10px] text-slate-500">workers</span>
           </div>
+        </div>
+
+        <div class="flex items-center justify-between">
+          <label class="font-medium text-slate-300 text-[11px] flex items-center gap-1" title="Dual Speed Concurrency: 2 Global (Bilibili/Overseas) + 2 Local (YouTube/Domestic) downloading together at the same time">
+            <span>Dual-Speed Channels:</span>
+            <span class="text-[9px] bg-purple-950 border border-purple-500/50 text-purple-300 px-1 py-0.2 rounded font-bold">2 Global + 2 Local</span>
+          </label>
+          <span class="text-[10px] text-cyan-300 font-mono font-bold bg-[#090e1f] px-1.5 py-0.5 rounded border border-[#1e2d4e]">4 Active 🚀</span>
         </div>
 
         <div class="flex items-center justify-between">
@@ -412,9 +476,13 @@
         </div>
 
         <div class="flex items-center justify-between pt-0.5">
+          <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300" title="Anti-bufferbloat socket pacing to prevent ping spikes on other Wi-Fi devices">
+            <input type="checkbox" id="chkWifiFriendly" checked class="custom-checkbox">
+            <span class="text-cyan-300 font-medium">Wi-Fi QoS Shield</span>
+          </label>
           <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300">
             <input type="checkbox" id="chkEnableGpu" checked class="custom-checkbox">
-            <span>GPU Acceleration</span>
+            <span>GPU Accel</span>
           </label>
           <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300">
             <input type="checkbox" id="chkRemoveMention" checked class="custom-checkbox">
@@ -496,19 +564,228 @@
     <div class="context-menu-item" id="menuUnselect">
       <span>⏹️</span> Unselect Item
     </div>
-    <div class="context-menu-divider"></div>
+    <div class="context-menu-divider" id="menuDividerQueue"></div>
     <div class="context-menu-item" id="menuPasteLinks">
       <span>📋</span> Paste links
     </div>
     <div class="context-menu-item" id="menuOpenLink">
       <span>🔗</span> Open Link in Browser
     </div>
-    <div class="context-menu-divider"></div>
+    <div class="context-menu-divider" id="menuDividerActivity"></div>
     <div class="context-menu-item" id="menuOpenFolder">
       <span>📂</span> Open in Folder
     </div>
+    <div class="context-menu-item" id="menuSetTimeRange">
+      <span>✂️</span> Custom Time Range (Clip)...
+    </div>
     <div class="context-menu-item" id="menuDeleteSelected">
       <span class="text-red-400">🗑️</span> Remove Item
+    </div>
+
+    <!-- Log Panel Items -->
+    <div class="context-menu-item" id="menuCopySelectedLog" style="display: none;">
+      <span>📄</span> Copy Selected Text
+    </div>
+    <div class="context-menu-item" id="menuCopyAllLogs" style="display: none;">
+      <span>📋</span> Copy All Logs
+    </div>
+    <div class="context-menu-divider" id="menuDividerLog" style="display: none;"></div>
+    <div class="context-menu-item" id="menuClearLogCtx" style="display: none;">
+      <span class="text-red-400">🗑️</span> Clear Logs
+    </div>
+  </div>
+
+  <!-- ==================== TIME RANGE & CLIPPING MODAL ==================== -->
+  <div id="timeRangeModal" class="fixed inset-0 bg-black/80 backdrop-blur-md z-50 hidden items-center justify-center p-4">
+    <div class="bg-[#0b1122] border border-[#223359] rounded-2xl w-full max-w-xl shadow-2xl flex flex-col overflow-hidden animate-modalScale">
+      
+      <!-- Modal Header -->
+      <div class="bg-gradient-to-r from-[#0d162d] via-[#131f3f] to-[#0d162d] px-5 py-3.5 border-b border-[#1f2d4e] flex items-center justify-between">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/40 flex items-center justify-center text-cyan-400 font-bold text-sm shadow-inner">
+            ✂️
+          </div>
+          <div>
+            <h3 class="font-extrabold text-sm text-slate-100 flex items-center gap-2">
+              <span>Custom Video Download Range & Clipping</span>
+              <span class="text-[9px] bg-cyan-950 border border-cyan-500/40 text-cyan-300 px-1.5 py-0.2 rounded font-mono uppercase">Direct Stream Cut</span>
+            </h3>
+            <p class="text-[10px] text-slate-400">Download only the exact segment you need (e.g. 9h to 10h) without downloading the full video</p>
+          </div>
+        </div>
+        <button id="btnCloseTimeRangeModal" class="text-slate-400 hover:text-white text-lg font-bold p-1 transition" title="Close">
+          ✕
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
+        
+        <!-- Video Target Header Card -->
+        <div class="bg-[#070b16] border border-[#1a2640] rounded-xl p-3 flex gap-3 items-center">
+          <div class="w-16 h-11 rounded-lg bg-[#0f172a] border border-slate-700/60 overflow-hidden shrink-0 relative">
+            <img id="trModalThumb" src="" class="w-full h-full object-cover" onerror="this.src='https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=100&q=80'">
+            <span id="trModalDurationBadge" class="absolute bottom-0 right-0 bg-black/90 text-cyan-300 text-[8px] font-mono px-1 rounded-tl">00:00:00</span>
+          </div>
+          <div class="flex-1 min-w-0">
+            <h4 id="trModalTitle" class="text-xs font-bold text-slate-100 line-clamp-1 truncate">Video Title</h4>
+            <div class="flex items-center gap-2 mt-1 text-[10px] text-slate-400">
+              <span id="trModalPlatform" class="text-blue-300 font-semibold">YouTube</span>
+              <span>•</span>
+              <span id="trModalTotalDuration">Total: 10:00:00</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Master Switch: Enable Custom Range -->
+        <div class="bg-[#0e172e] border border-blue-500/30 rounded-xl p-3 flex items-center justify-between">
+          <div>
+            <label for="chkEnableTimeRange" class="font-bold text-xs text-slate-200 cursor-pointer flex items-center gap-2">
+              <input type="checkbox" id="chkEnableTimeRange" class="custom-checkbox w-4 h-4">
+              <span>Enable Custom Time Range (Clip Section)</span>
+            </label>
+            <p class="text-[10px] text-slate-400 ml-6">When enabled, SnapKee downloads only the specified range directly from the stream</p>
+          </div>
+          <span id="trActiveStatusBadge" class="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">Full Video</span>
+        </div>
+
+        <!-- Quick Presets -->
+        <div id="trControlsSection" class="space-y-3.5 transition-all">
+          <div>
+            <span class="text-[11px] font-semibold text-slate-300 block mb-1.5">⚡ Quick Presets (One-Click Selection):</span>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-xs">
+              <button type="button" class="tr-preset-btn" data-preset="full">
+                <span>🎬</span> Full Video
+              </button>
+              <button type="button" class="tr-preset-btn active" data-preset="last1h" title="Download only the final 1 hour (e.g. 09:00:00 to 10:00:00)">
+                <span>⏳</span> Last 1 Hour
+              </button>
+              <button type="button" class="tr-preset-btn" data-preset="last2h" title="Download only the final 2 hours">
+                <span>⏳</span> Last 2 Hours
+              </button>
+              <button type="button" class="tr-preset-btn" data-preset="last30m" title="Download only the final 30 minutes">
+                <span>⏳</span> Last 30 Mins
+              </button>
+              <button type="button" class="tr-preset-btn" data-preset="first10m" title="Download first 10 minutes">
+                <span>⏱️</span> First 10 Mins
+              </button>
+              <button type="button" class="tr-preset-btn" data-preset="first30m" title="Download first 30 minutes">
+                <span>⏱️</span> First 30 Mins
+              </button>
+              <button type="button" class="tr-preset-btn" data-preset="first1h" title="Download first 1 hour">
+                <span>⏱️</span> First 1 Hour
+              </button>
+              <button type="button" class="tr-preset-btn" data-preset="custom" title="Enter custom start and end timestamps">
+                <span>🎯</span> Custom
+              </button>
+            </div>
+          </div>
+
+          <!-- Time Inputs: Start & End -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-[#070b16] border border-[#1b2742] p-3 rounded-xl">
+            <!-- Start Time -->
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between">
+                <label class="text-[11px] font-bold text-slate-200 flex items-center gap-1.5">
+                  <span class="text-cyan-400">▶</span> Start Time (From):
+                </label>
+                <button type="button" id="btnStartZero" class="text-[9px] text-slate-400 hover:text-cyan-300">Set 00:00:00</button>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <input 
+                  type="text" 
+                  id="trInputStart" 
+                  value="09:00:00" 
+                  placeholder="09:00:00 or 9h"
+                  class="w-full bg-[#0d1426] border border-[#253966] rounded-lg px-2.5 py-1.5 text-cyan-300 font-mono font-bold text-xs input-studio text-center"
+                />
+              </div>
+              <!-- Quick step buttons for start -->
+              <div class="flex items-center justify-between gap-1 text-[9px] text-slate-400">
+                <button type="button" class="tr-step-btn" data-target="start" data-delta="-3600">-1h</button>
+                <button type="button" class="tr-step-btn" data-target="start" data-delta="-600">-10m</button>
+                <button type="button" class="tr-step-btn" data-target="start" data-delta="+600">+10m</button>
+                <button type="button" class="tr-step-btn" data-target="start" data-delta="+3600">+1h</button>
+              </div>
+            </div>
+
+            <!-- End Time -->
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between">
+                <label class="text-[11px] font-bold text-slate-200 flex items-center gap-1.5">
+                  <span class="text-amber-400">⏹</span> End Time (To):
+                </label>
+                <label class="flex items-center gap-1 text-[9px] text-slate-300 cursor-pointer">
+                  <input type="checkbox" id="chkToEnd" checked class="custom-checkbox">
+                  <span>To End (inf)</span>
+                </label>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <input 
+                  type="text" 
+                  id="trInputEnd" 
+                  value="10:00:00" 
+                  placeholder="10:00:00 or inf"
+                  class="w-full bg-[#0d1426] border border-[#253966] rounded-lg px-2.5 py-1.5 text-amber-300 font-mono font-bold text-xs input-studio text-center"
+                />
+              </div>
+              <!-- Quick step buttons for end -->
+              <div class="flex items-center justify-between gap-1 text-[9px] text-slate-400">
+                <button type="button" class="tr-step-btn" data-target="end" data-delta="-3600">-1h</button>
+                <button type="button" class="tr-step-btn" data-target="end" data-delta="-600">-10m</button>
+                <button type="button" class="tr-step-btn" data-target="end" data-delta="+600">+10m</button>
+                <button type="button" class="tr-step-btn" data-target="end" data-delta="+3600">+1h</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Visual Timeline Graphic -->
+          <div class="bg-[#070b16] border border-[#1b2742] p-3 rounded-xl space-y-2">
+            <div class="flex items-center justify-between text-[11px]">
+              <span class="text-slate-400 font-medium">Timeline Graphic Preview:</span>
+              <span id="trSelectedDurationLabel" class="font-mono font-bold text-cyan-300">Selected: 1h 00m 00s (10.0%)</span>
+            </div>
+
+            <!-- Track Bar -->
+            <div class="relative w-full h-4 bg-[#0a101f] rounded-full border border-slate-700/60 overflow-hidden shadow-inner flex items-center">
+              <div id="trTimelineFill" class="absolute h-full bg-gradient-to-r from-cyan-500 via-blue-500 to-amber-400 shadow-lg shadow-cyan-500/50" style="left: 90%; width: 10%;"></div>
+            </div>
+
+            <div class="flex items-center justify-between text-[9px] font-mono text-slate-400">
+              <span id="trTimelineStartLabel">00:00:00</span>
+              <span id="trTimelineCutLabel" class="text-cyan-300 font-bold bg-[#0e172e] border border-cyan-500/30 px-1.5 py-0.2 rounded">Clip: 09:00:00 → 10:00:00</span>
+              <span id="trTimelineEndLabel">10:00:00</span>
+            </div>
+
+            <!-- Savings note -->
+            <div class="bg-cyan-950/40 border border-cyan-500/30 text-cyan-300 text-[10px] px-2.5 py-1.5 rounded-lg flex items-center gap-1.5">
+              <span>⚡</span>
+              <span id="trSavingsNote">Smart Stream Clipping will save ~90% download bandwidth & time by skipping the first 9 hours!</span>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="bg-[#090e1c] px-5 py-3 border-t border-[#1f2d4e] flex items-center justify-between">
+        <button type="button" id="btnResetTimeRange" class="btn-surface text-slate-400 hover:text-white px-3 py-1.5 rounded-lg text-xs font-semibold">
+          Reset (Full Video)
+        </button>
+        <div class="flex items-center gap-2">
+          <button type="button" id="btnCancelTimeRange" class="btn-surface px-3 py-1.5 rounded-lg text-xs text-slate-300">
+            Cancel
+          </button>
+          <button type="button" id="btnApplyTimeRangeSelected" class="btn-surface px-3 py-1.5 rounded-lg text-xs font-semibold text-blue-300 hover:text-white border-blue-500/40">
+            Apply to All Selected
+          </button>
+          <button type="button" id="btnSaveTimeRange" class="btn-primary-glow px-4 py-1.5 rounded-lg text-xs font-bold shadow-md">
+            Save Range
+          </button>
+        </div>
+      </div>
+
     </div>
   </div>
 
